@@ -1,0 +1,30 @@
+{
+  "site_title": "Mock LLM API 控制台",
+  "default_model_id": "claude-fable-5",
+  "default_error": {
+    "code": 529,
+    "message": "Overloaded Error"
+  },
+  "enable_admin": true,
+  "enable_cors": true,
+  "log_requests": true,
+  "global_delay_ms": 0,
+  "models": {
+    "claude-fable-5": {
+      "id": "claude-fable-5",
+      "name": "Claude Fable 5",
+      "number": 1,
+      "response": "你好，我是 Claude Fable 5，这是一个固定回复",
+      "error_mode": false,
+      "error": {
+        "code": 529,
+        "message": "Overloaded Error"
+      },
+      "delay_ms": 0,
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "stream_chunk_size": 0,
+      "metadata": {}
+    }
+  }
+}
