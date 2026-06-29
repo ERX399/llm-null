@@ -74,10 +74,11 @@ function parseBlock(lines, start, indent) {
         const sub = parseBlock(lines, i + 1, nextIndent);
         result[k] = sub.value;
         i = sub.end;
+        // 不做 i++，sub.end 已指向下一行
       } else {
         result[k] = {};
+        i++;
       }
-      i++;
     } else {
       result[k] = parseScalar(val);
       i++;
