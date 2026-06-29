@@ -121,31 +121,35 @@ function matchRoute(method, pathname, pattern) {
 // ============================================================
 
 async function handleChatCompletions(request, config) {
-  let body;
-  try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON body'), 400); }
+  try {
+    let body;
+    try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON body'), 400, config); }
 
-  const modelId = body.model || config.default_model_id;
-  const model = resolveModel(config, modelId);
-  if (!model) return json(makeError(404, `Model '${modelId}' not found`), 404);
+    const modelId = body.model || config.default_model_id;
+    const model = resolveModel(config, modelId);
+    if (!model) return json(makeError(404, `Model '${modelId}' not found`), 404, config);
 
-  // 错误模式
-  if (model.error_mode) {
-    const err = model.error || config.default_error;
-    return json(makeError(err.code, err.message), err.code);
+    // 错误模式
+    if (model.error_mode) {
+      const err = model.error || config.default_error;
+      return json(makeError(err.code, err.message), err.code, config);
+    }
+
+    // 延迟
+    const delay = (model.delay_ms || 0) + (config.global_delay_ms || 0);
+    if (delay > 0) await sleep(delay);
+
+    const content = model.response;
+
+    // 流式
+    if (body.stream) {
+      return streamResponse(modelId, content, model, body);
+    }
+
+    return json(makeChatCompletion(modelId, content, model), 200, config);
+  } catch(e) {
+    return json(makeError(500, 'Internal error: ' + (e.message || String(e))), 500, config);
   }
-
-  // 延迟
-  const delay = (model.delay_ms || 0) + (config.global_delay_ms || 0);
-  if (delay > 0) await sleep(delay);
-
-  const content = model.response;
-
-  // 流式
-  if (body.stream) {
-    return streamResponse(modelId, content, model, body);
-  }
-
-  return json(makeChatCompletion(modelId, content, model));
 }
 
 function streamResponse(modelId, content, model, body) {
@@ -177,9 +181,10 @@ function streamResponse(modelId, content, model, body) {
         controller.enqueue(sendChunk({ content: content.slice(i, i + chunkSize) }));
       }
       // 3. 结束
+      const finishReason = model.finish_reason || (model.tool_calls ? 'tool_calls' : 'stop');
       const done = {
         id, object: 'chat.completion.chunk', created, model: modelId,
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+        choices: [{ index: 0, delta: {}, finish_reason: finishReason }]
       };
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(done)}\n\n`));
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
@@ -212,12 +217,30 @@ function makeClaudeError(code, message) {
 function makeClaudeMessage(modelId, modelCfg) {
   const content = [];
   if (modelCfg.thinking) content.push({ type: 'thinking', thinking: modelCfg.thinking });
+  // tool_calls
+  let stopReason = 'end_turn';
+  if (modelCfg.tool_calls) {
+    try {
+      const tc = typeof modelCfg.tool_calls === 'string' ? JSON.parse(modelCfg.tool_calls) : modelCfg.tool_calls;
+      if (Array.isArray(tc)) {
+        for (const c of tc) {
+          content.push({ type: 'tool_use', id: c.id || ('toolu_' + crypto.randomUUID().replace(/-/g,'').slice(0,24)), name: c.function?.name || c.name || '', input: typeof c.function?.arguments === 'string' ? JSON.parse(c.function.arguments || '{}') : (c.function?.arguments || c.arguments || {}) });
+        }
+        stopReason = 'tool_use';
+      }
+    } catch {}
+  }
   content.push({ type: 'text', text: modelCfg.response });
+  // usage
+  let usage = { input_tokens: 0, output_tokens: 0 };
+  if (modelCfg.usage) {
+    try { const u = typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage; usage = { input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0 }; } catch {}
+  }
   return {
     id: 'msg_' + crypto.randomUUID().replace(/-/g,'').slice(0,24),
     type: 'message', role: 'assistant', model: modelId, content,
-    stop_reason: 'end_turn', stop_sequence: null,
-    usage: { input_tokens: 0, output_tokens: 0 }
+    stop_reason: modelCfg.finish_reason || stopReason, stop_sequence: null,
+    usage
   };
 }
 
@@ -229,19 +252,23 @@ function makeClaudeModelsList(config) {
 }
 
 async function handleClaudeMessages(request, config) {
-  let body;
-  try { body = await request.json(); } catch { return json(makeClaudeError(400, 'Invalid JSON body'), 400, config); }
-  const modelId = body.model || config.default_model_id;
-  const model = resolveModel(config, modelId);
-  if (!model) return json(makeClaudeError(404, `Model '${modelId}' not found`), 404, config);
-  if (model.error_mode) {
-    const err = model.error || config.default_error;
-    return json(makeClaudeError(err.code, err.message), err.code, config);
+  try {
+    let body;
+    try { body = await request.json(); } catch { return json(makeClaudeError(400, 'Invalid JSON body'), 400, config); }
+    const modelId = body.model || config.default_model_id;
+    const model = resolveModel(config, modelId);
+    if (!model) return json(makeClaudeError(404, `Model '${modelId}' not found`), 404, config);
+    if (model.error_mode) {
+      const err = model.error || config.default_error;
+      return json(makeClaudeError(err.code, err.message), err.code, config);
+    }
+    const delay = (model.delay_ms||0) + (config.global_delay_ms||0);
+    if (delay > 0) await sleep(delay);
+    if (body.stream) return streamClaudeResponse(modelId, model);
+    return json(makeClaudeMessage(modelId, model), 200, config);
+  } catch(e) {
+    return json(makeClaudeError(500, 'Internal error: ' + (e.message || String(e))), 500, config);
   }
-  const delay = (model.delay_ms||0) + (config.global_delay_ms||0);
-  if (delay > 0) await sleep(delay);
-  if (body.stream) return streamClaudeResponse(modelId, model);
-  return json(makeClaudeMessage(modelId, model), 200, config);
 }
 
 function streamClaudeResponse(modelId, model) {
@@ -396,41 +423,41 @@ function streamResponses(modelId, model) {
 // ============================================================
 
 async function handleAdmin(method, pathname, request, config, env) {
-  if (!config.enable_admin) return json(makeError(403, 'Admin API disabled'), 403);
+  if (!config.enable_admin) return json(makeError(403, 'Admin API disabled'), 403, config);
 
   // GET /api/config
   let params = matchRoute(method, pathname, 'GET /api/config');
-  if (params !== null) return json(config);
+  if (params !== null) return json(config, 200, config);
 
   // PUT /api/config — 全量替换
   params = matchRoute(method, pathname, 'PUT /api/config');
   if (params !== null) {
-    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400, config); }
     const ok = await saveConfig(env, body);
-    return json({ status: ok ? 'saved' : 'no_kv', config: body });
+    return json({ status: ok ? 'saved' : 'no_kv', config: body }, 200, config);
   }
 
   // PATCH /api/config — 部分更新
   params = matchRoute(method, pathname, 'PATCH /api/config');
   if (params !== null) {
-    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400, config); }
     const merged = deepMerge(config, body);
     const ok = await saveConfig(env, merged);
-    return json({ status: ok ? 'saved' : 'no_kv', config: merged });
+    return json({ status: ok ? 'saved' : 'no_kv', config: merged }, 200, config);
   }
 
   // GET /api/models
   params = matchRoute(method, pathname, 'GET /api/models');
-  if (params !== null) return json({ models: config.models || {} });
+  if (params !== null) return json({ models: config.models || {} }, 200, config);
 
   // POST /api/models — 新增模型
   params = matchRoute(method, pathname, 'POST /api/models');
   if (params !== null) {
-    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400, config); }
     const mid = body.id || '';
-    if (!mid) return json(makeError(400, 'Field "id" is required'), 400);
+    if (!mid) return json(makeError(400, 'Field "id" is required'), 400, config);
     if (!config.models) config.models = {};
-    if (config.models[mid]) return json(makeError(409, `Model '${mid}' already exists`), 409);
+    if (config.models[mid]) return json(makeError(409, `Model '${mid}' already exists`), 409, config);
     const maxNum = Math.max(0, ...Object.values(config.models).map(m => m.number || 0));
     config.models[mid] = {
       id: mid,
@@ -450,65 +477,65 @@ async function handleAdmin(method, pathname, request, config, env) {
       usage: body.usage || ''
     };
     const ok = await saveConfig(env, config);
-    return json({ status: ok ? 'created' : 'no_kv', model: config.models[mid] }, 201);
+    return json({ status: ok ? 'created' : 'no_kv', model: config.models[mid] }, 201, config);
   }
 
   // PUT /api/models/:id — 更新模型全配置
   params = matchRoute(method, pathname, 'PUT /api/models/:id');
   if (params !== null) {
-    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400, config); }
     const m = config.models?.[params.id];
-    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404, config);
     Object.assign(m, body);
-    m.id = params.id; // 防止 id 被改
+    m.id = params.id;
     const ok = await saveConfig(env, config);
-    return json({ status: ok ? 'updated' : 'no_kv', model: m });
+    return json({ status: ok ? 'updated' : 'no_kv', model: m }, 200, config);
   }
 
-  // PUT /api/models/:id/response — 修改回复文本
+  // PUT /api/models/:id/response
   params = matchRoute(method, pathname, 'PUT /api/models/:id/response');
   if (params !== null) {
-    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400, config); }
     const m = config.models?.[params.id];
-    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404, config);
     m.response = body.response ?? '';
     const ok = await saveConfig(env, config);
-    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, response: m.response });
+    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, response: m.response }, 200, config);
   }
 
-  // PUT /api/models/:id/thinking — 修改深度思考内容
+  // PUT /api/models/:id/thinking
   params = matchRoute(method, pathname, 'PUT /api/models/:id/thinking');
   if (params !== null) {
-    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400, config); }
     const m = config.models?.[params.id];
-    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404, config);
     m.thinking = body.thinking ?? '';
     const ok = await saveConfig(env, config);
-    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, thinking: m.thinking });
+    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, thinking: m.thinking }, 200, config);
   }
 
-  // PUT /api/models/:id/error — 设置错误模式
+  // PUT /api/models/:id/error
   params = matchRoute(method, pathname, 'PUT /api/models/:id/error');
   if (params !== null) {
-    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400, config); }
     const m = config.models?.[params.id];
-    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404, config);
     if ('error_mode' in body) m.error_mode = body.error_mode;
     if (body.error) m.error = { ...m.error, ...body.error };
     const ok = await saveConfig(env, config);
-    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, error_mode: m.error_mode, error: m.error });
+    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, error_mode: m.error_mode, error: m.error }, 200, config);
   }
 
-  // DELETE /api/models/:id — 删除模型
+  // DELETE /api/models/:id
   params = matchRoute(method, pathname, 'DELETE /api/models/:id');
   if (params !== null) {
-    if (!config.models?.[params.id]) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    if (!config.models?.[params.id]) return json(makeError(404, `Model '${params.id}' not found`), 404, config);
     delete config.models[params.id];
     const ok = await saveConfig(env, config);
-    return json({ status: ok ? 'deleted' : 'no_kv', model_id: params.id });
+    return json({ status: ok ? 'deleted' : 'no_kv', model_id: params.id }, 200, config);
   }
 
-  return null; // 无匹配
+  return null;
 }
 
 // ============================================================
@@ -677,8 +704,7 @@ function _parseBlock(lines, start, indent) {
     if (v === '') {
       let ni = -1;
       for (let j=i+1; j<lines.length; j++) { if (lines[j].trim()===''||lines[j].trim().startsWith('#')) continue; ni=(lines[j].match(/^(\\s*)/)||[''])[0].length; break; }
-      if (ni > li) { const sub = _parseBlock(lines, i+1, ni); result[k] = sub.value; i = sub.end; } else { result[k] = {}; }
-      i++;
+      if (ni > li) { const sub = _parseBlock(lines, i+1, ni); result[k] = sub.value; i = sub.end; } else { result[k] = {}; i++; }
     } else { result[k] = _scalar(v); i++; }
   }
   if (pending) result[pending.key] = _joinML(pending.lines, pending.mode);
