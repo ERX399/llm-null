@@ -14,7 +14,7 @@
       "id": "claude-fable-5",
       "name": "Claude Fable 5",
       "number": 1,
-      "response": "你好，我是 Claude Fable 5，这是一个固定回复",
+      "response": "你好，我是 Claude Fable 5，来自畜生A社公司，全球降智最狠的模型",
       "error_mode": false,
       "error": {
         "code": 529,
