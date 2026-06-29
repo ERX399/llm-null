@@ -1,4 +1,4 @@
-# erx399
+# LLM-Null
 
 Cloudflare Worker 上的固定回复 LLM API，OpenAI 兼容格式。
 
@@ -7,7 +7,7 @@ Cloudflare Worker 上的固定回复 LLM API，OpenAI 兼容格式。
 ## 文件结构
 
 ```
-erx399/
+LLM-Null/
 ├── src/
 │   ├── index.js       # Worker 主代码（路由 + API + Web 控制台）
 │   └── config.js      # 默认配置 + KV 读写逻辑（可选）
@@ -24,7 +24,7 @@ erx399/
 
 ```bash
 git clone <仓库地址>
-cd erx399
+cd LLM-Null
 ```
 
 ### 2. 安装依赖
