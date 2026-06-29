@@ -6,7 +6,7 @@ export const DEFAULT_CONFIG = {
   "default_model_id": "claude-fable-5",
   "default_error": {
     "code": 529,
-    "message": "Overloaded Error"
+    "message": "是的这其实是个假模型"
   },
   "enable_admin": true,
   "enable_cors": true,
@@ -21,7 +21,7 @@ export const DEFAULT_CONFIG = {
       "error_mode": false,
       "error": {
         "code": 529,
-        "message": "Overloaded Error"
+        "message": "是的这其实是个假模型"
       },
       "delay_ms": 0,
       "max_tokens": 4096,
