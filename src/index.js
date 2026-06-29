@@ -313,7 +313,8 @@ function streamClaudeResponse(modelId, model) {
         }
         ctrl.enqueue(ev('content_block_stop', { type:'content_block_stop', index:0 }));
       }
-      ctrl.enqueue(ev('message_delta', { type:'message_delta', delta:{ stop_reason:'end_turn', stop_sequence:null }, usage:{ output_tokens:0 } }));
+      const claudeStreamStopReason = model.finish_reason || (model.tool_calls ? 'tool_use' : 'end_turn');
+      ctrl.enqueue(ev('message_delta', { type:'message_delta', delta:{ stop_reason:claudeStreamStopReason, stop_sequence:null }, usage:{ output_tokens:0 } }));
       ctrl.enqueue(ev('message_stop', { type:'message_stop' }));
       ctrl.close();
     }
@@ -763,7 +764,7 @@ async function api(method, path, body) {
 
 function esc(s) {
   if (s == null) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'"').replace(/'/g,'&#39;').replace(/\\\\/g,'&#92;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\\\\/g,'&#92;');
 }
 
 async function loadModels() {
@@ -941,12 +942,12 @@ export default {
 
     // 健康检查
     if (matchRoute(method, pathname, 'GET /health')) {
-      return json({ status: 'ok', timestamp: Date.now() });
+      return json({ status: 'ok', timestamp: Date.now() }, 200, config);
     }
 
     // OpenAI: 列出模型
     if (matchRoute(method, pathname, 'GET /v1/models') || matchRoute(method, pathname, 'GET /models')) {
-      return json(makeModelsList(config));
+      return json(makeModelsList(config), 200, config);
     }
 
     // OpenAI: 聊天补全
@@ -978,6 +979,6 @@ export default {
       return html(consoleHTML(config));
     }
 
-    return json(makeError(404, `Cannot ${method} ${pathname}`), 404);
+    return json(makeError(404, `Cannot ${method} ${pathname}`), 404, config);
   }
 };
