@@ -212,6 +212,8 @@ function formatScalar(val) {
   }
   return String(val);
 }
+
+function joinMultiline(lines, mode) {
   // 去掉尾部空行
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
     lines.pop();
