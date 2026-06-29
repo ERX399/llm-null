@@ -2,6 +2,7 @@
 // OpenAI 兼容固定回复 API + Web 控制台 + 高自由度配置管理
 
 import { DEFAULT_CONFIG, getConfig, saveConfig, deepMerge } from './config.js';
+import { dump as yamlDump, parse as yamlParse } from './yaml.js';
 
 // ============================================================
 //  工具函数
@@ -467,16 +468,7 @@ async function handleAdmin(method, pathname, request, config, env) {
 
 function consoleHTML(config) {
   const title = config.site_title || 'Mock LLM API';
-  const modelsJSON = JSON.stringify(config.models || {}, null, 2);
-  const configJSON = JSON.stringify({
-    site_title: config.site_title,
-    default_model_id: config.default_model_id,
-    default_error: config.default_error,
-    enable_admin: config.enable_admin,
-    enable_cors: config.enable_cors,
-    log_requests: config.log_requests,
-    global_delay_ms: config.global_delay_ms
-  }, null, 2);
+  const configYAML = yamlDump(config);
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -546,9 +538,9 @@ function consoleHTML(config) {
 
     <!-- 配置编辑器 -->
     <div class="card">
-      <h2>⚙️ 全局配置</h2>
-      <p style="font-size:0.8rem;color:#64748b;margin-bottom:8px">修改后点保存，立即生效（写入 KV）</p>
-      <textarea id="configEditor">${configJSON}</textarea>
+      <h2>⚙️ 全局配置 (YAML)</h2>
+      <p style="font-size:0.8rem;color:#64748b;margin-bottom:8px">YAML 格式，支持注释和多行文本（| 保留换行），修改后点保存</p>
+      <textarea id="configEditor" style="min-height:500px">${configYAML}</textarea>
       <div class="btn-row">
         <button class="btn btn-primary btn-sm" onclick="saveConfig()">保存配置</button>
         <button class="btn btn-sm" style="background:#475569;color:#fff" onclick="loadConfig()">重载</button>
@@ -606,6 +598,78 @@ function consoleHTML(config) {
 
 <script>
 const API = '';
+
+// ===== 轻量 YAML 解析器（浏览器端） =====
+function yamlParse(text) {
+  const lines = text.split('\\n');
+  return _parseBlock(lines, 0, 0).value || {};
+}
+function _parseBlock(lines, start, indent) {
+  const result = {};
+  let i = start;
+  let pending = null;
+  while (i < lines.length) {
+    let line = lines[i];
+    if (line.trim() === '' || line.trim().startsWith('#')) { i++; continue; }
+    if (pending) {
+      const li = (line.match(/^(\\s*)/)||[''])[0].length;
+      if (line.trim() === '' || li > indent) { pending.lines.push(line.slice(indent+2)); i++; continue; }
+      else { result[pending.key] = _joinML(pending.lines, pending.mode); pending = null; }
+    }
+    const li = (line.match(/^(\\s*)/)||[''])[0].length;
+    if (li < indent) break;
+    const t = line.slice(li);
+    const ci = _findColon(t);
+    if (ci === -1) { i++; continue; }
+    const k = t.slice(0, ci).trim();
+    let v = t.slice(ci+1).trim();
+    v = _stripComment(v);
+    if (v === '|' || v === '>' || v === '|-' || v === '>-') { pending = {key:k, mode:v[0], lines:[]}; i++; continue; }
+    if (v === '') {
+      let ni = -1;
+      for (let j=i+1; j<lines.length; j++) { if (lines[j].trim()===''||lines[j].trim().startsWith('#')) continue; ni=(lines[j].match(/^(\\s*)/)||[''])[0].length; break; }
+      if (ni > li) { const sub = _parseBlock(lines, i+1, ni); result[k] = sub.value; i = sub.end; } else { result[k] = {}; }
+      i++;
+    } else { result[k] = _scalar(v); i++; }
+  }
+  if (pending) result[pending.key] = _joinML(pending.lines, pending.mode);
+  return { value: result, end: i };
+}
+function _findColon(s) { let q=false, c=''; for (let i=0;i<s.length;i++) { if (q) { if (s[i]===c) q=false; } else { if (s[i]==='"'||s[i]==="'") { q=true; c=s[i]; } else if (s[i]===':') return i; } } return -1; }
+function _stripComment(v) { if (v.startsWith('"')||v.startsWith("'")) return v; const m = v.match(/\\s+#/); return m ? v.slice(0, m.index).trim() : v; }
+function _scalar(v) {
+  if (v==='true') return true; if (v==='false') return false; if (v==='null'||v==='~') return null;
+  if (v==='{}') return {}; if (v==='[]') return [];
+  if ((v.startsWith('"')&&v.endsWith('"'))||(v.startsWith("'")&&v.endsWith("'"))) return v.slice(1,-1);
+  if (/^-?\\d+$/.test(v)) return parseInt(v);
+  if (/^-?\\d+\\.\\d+$/.test(v)) return parseFloat(v);
+  return v;
+}
+function _joinML(lines, mode) { while (lines.length && lines[lines.length-1].trim()==='') lines.pop(); return lines.join('\\n')+'\\n'; }
+
+function yamlDump(obj, indent=0) {
+  const pad = '  '.repeat(indent);
+  const lines = [];
+  if (obj===null||obj===undefined) return '';
+  if (typeof obj !== 'object') return _fmtSc(obj);
+  if (Array.isArray(obj)) { for (const it of obj) { lines.push(pad+'- '+(typeof it==='object'?yamlDump(it,indent+1).trimStart():_fmtSc(it))); } return lines.join('\\n'); }
+  for (const [k,v] of Object.entries(obj)) {
+    if (v===null||v===undefined) { lines.push(pad+k+': null'); }
+    else if (typeof v==='string' && (v.includes('\\n')||v.length>80)) { const ml=v.split('\\n'); while(ml.length&&ml[ml.length-1]==='') ml.pop(); lines.push(pad+k+': |'); for (const l of ml) lines.push(pad+'  '+l); }
+    else if (typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length===0) { lines.push(pad+k+': {}'); }
+    else if (Array.isArray(v)&&v.length===0) { lines.push(pad+k+': []'); }
+    else if (typeof v==='object') { const s=yamlDump(v,indent+1); if (s) { lines.push(pad+k+':'); lines.push(s); } else { lines.push(pad+k+': {}'); } }
+    else { lines.push(pad+k+': '+_fmtSc(v)); }
+  }
+  return lines.join('\\n');
+}
+function _fmtSc(v) {
+  if (v===true) return 'true'; if (v===false) return 'false'; if (v===null) return 'null';
+  if (typeof v==='number') return String(v);
+  if (typeof v==='string') { if (v==='') return '""'; if (v.startsWith(' ')||v.endsWith(' ')||v.includes(': ')||v.startsWith('#')||v==='true'||v==='false'||v==='null'||/^\\d+$/.test(v)) return '"'+v.replace(/\\\\/g,'\\\\\\\\').replace(/"/g,'\\"')+'"'; return v; }
+  return String(v);
+}
+
 function toast(msg, ok=true) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -657,18 +721,18 @@ async function loadModels() {
 
 async function loadConfig() {
   const data = await api('GET', '/api/config');
-  const cfg = { site_title: data.site_title, default_model_id: data.default_model_id, default_error: data.default_error, enable_admin: data.enable_admin, enable_cors: data.enable_cors, log_requests: data.log_requests, global_delay_ms: data.global_delay_ms };
-  document.getElementById('configEditor').value = JSON.stringify(cfg, null, 2);
+  document.getElementById('configEditor').value = yamlDump(data);
   toast('配置已重载');
 }
 
 async function saveConfig() {
   try {
-    const body = JSON.parse(document.getElementById('configEditor').value);
+    const text = document.getElementById('configEditor').value;
+    const body = yamlParse(text);
     await api('PATCH', '/api/config', body);
     toast('配置已保存');
     loadModels();
-  } catch(e) { toast('JSON 格式错误', false); }
+  } catch(e) { toast('YAML 格式错误: ' + e.message, false); }
 }
 
 async function editModel(id) {
