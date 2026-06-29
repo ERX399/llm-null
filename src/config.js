@@ -1,14 +1,15 @@
-// config.js — 从 config.json 加载配置，运行时可通过 KV 覆盖
-// config.json 是唯一配置源，编辑它即可修改所有默认行为
+// config.js — 从 config.yaml 加载配置，运行时可通过 KV 覆盖
+// config.yaml 是唯一配置源，编辑它即可修改所有默认行为
 
-import configJson from '../config.json';
+import { parse } from './yaml.js';
 
-export const DEFAULT_CONFIG = configJson;
+// 构建时将 config.yaml 作为文本导入
+import configFile from '../config.yaml?raw';
 
-// KV key
+export const DEFAULT_CONFIG = parse(configFile);
+
 const KV_CONFIG_KEY = "runtime_config";
 
-// 深合并（简单实现：覆盖标量，递归合并对象，数组直接替换）
 export function deepMerge(base, override) {
   if (typeof base !== 'object' || base === null) return override;
   if (typeof override !== 'object' || override === null) return override;
@@ -34,7 +35,6 @@ export async function getConfig(env) {
       } catch {}
     }
   }
-  // 环境变量覆盖
   if (env.CONFIG_OVERRIDE) {
     try {
       const override = JSON.parse(env.CONFIG_OVERRIDE);
