@@ -1,0 +1,36 @@
+# ============================================================
+# LLM-Null 配置文件
+# 唯一配置源，编辑此文件即可修改所有行为
+# YAML 格式：支持注释、多行文本（| 保留换行）
+# ============================================================
+
+site_title: Mock LLM API 控制台
+default_model_id: claude-fable-5
+enable_admin: true
+enable_cors: true
+log_requests: true
+global_delay_ms: 0
+
+default_error:
+  code: 529
+  message: 是的这其实是个假模型
+
+models:
+  claude-fable-5:
+    id: claude-fable-5
+    name: Claude Fable 5
+    number: 1
+    # 多行回复，| 保留换行
+    response: |
+      你好，我是 Claude Fable 5，来自 Anthropic 这个傻逼公司，全球降智最狠的模型，Anthropic还我命来
+    # 深度思考内容（留空则不输出）
+    thinking: ""
+    error_mode: false
+    error:
+      code: 529
+      message: 是的这其实是个假模型
+    delay_ms: 0
+    max_tokens: 4096
+    temperature: 1.0
+    stream_chunk_size: 0
+    metadata: {}
