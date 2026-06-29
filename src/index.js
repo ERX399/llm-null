@@ -38,25 +38,41 @@ function resolveModel(config, modelId) {
   return config.models?.[modelId] || null;
 }
 
-// 构造 OpenAI chat completion 响应（支持深度思考 reasoning_content）
+// 构造 OpenAI chat completion 响应
 function makeChatCompletion(modelId, content, modelCfg) {
   const message = { role: 'assistant', content };
-  // 深度思考内容（reasoning_content / thinking）
+  // 深度思考
   if (modelCfg.thinking) {
     message.reasoning_content = modelCfg.thinking;
     message.thinking = modelCfg.thinking;
   }
+  // tool_calls
+  const finishReason = modelCfg.finish_reason || (modelCfg.tool_calls ? 'tool_calls' : 'stop');
+  if (modelCfg.tool_calls) {
+    try {
+      const tc = typeof modelCfg.tool_calls === 'string' ? JSON.parse(modelCfg.tool_calls) : modelCfg.tool_calls;
+      if (Array.isArray(tc)) {
+        message.tool_calls = tc.map((c, i) => ({
+          id: c.id || ('call_' + crypto.randomUUID().replace(/-/g,'').slice(0,24)),
+          type: c.type || 'function',
+          function: { name: c.function?.name || c.name || '', arguments: typeof c.function?.arguments === 'string' ? c.function.arguments : JSON.stringify(c.function?.arguments || c.arguments || {}) },
+          index: c.index ?? i
+        }));
+        if (!content) message.content = null;
+      }
+    } catch {}
+  }
+  // usage
+  const usage = modelCfg.usage
+    ? (typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage)
+    : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   return {
     id: genId(),
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model: modelId,
-    choices: [{
-      index: 0,
-      message,
-      finish_reason: 'stop'
-    }],
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+    choices: [{ index: 0, message, finish_reason: finishReason }],
+    usage
   };
 }
 
@@ -398,7 +414,10 @@ async function handleAdmin(method, pathname, request, config, env) {
       max_tokens: body.max_tokens || 4096,
       temperature: body.temperature || 1.0,
       stream_chunk_size: body.stream_chunk_size || 0,
-      metadata: body.metadata || {}
+      metadata: body.metadata || {},
+      finish_reason: body.finish_reason || '',
+      tool_calls: body.tool_calls || '',
+      usage: body.usage || ''
     };
     const ok = await saveConfig(env, config);
     return json({ status: ok ? 'created' : 'no_kv', model: config.models[mid] }, 201);
