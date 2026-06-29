@@ -301,33 +301,56 @@ function streamClaudeResponse(modelId, model) {
 
 function makeResponsesResult(modelId, modelCfg) {
   const out = [];
+  // reasoning
   if (modelCfg.thinking) {
     out.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: modelCfg.thinking }] });
   }
+  // tool_calls
+  if (modelCfg.tool_calls) {
+    try {
+      const tc = typeof modelCfg.tool_calls === 'string' ? JSON.parse(modelCfg.tool_calls) : modelCfg.tool_calls;
+      if (Array.isArray(tc)) {
+        for (const c of tc) {
+          out.push({ type: 'tool_call', id: c.id || ('call_' + crypto.randomUUID().replace(/-/g,'').slice(0,24)),
+            tool: c.function?.name || c.name || '', arguments: typeof c.function?.arguments === 'string' ? c.function.arguments : JSON.stringify(c.function?.arguments || c.arguments || {}) });
+        }
+      }
+    } catch {}
+  }
+  // message
   out.push({ type: 'message', role: 'assistant', id: 'msg_' + crypto.randomUUID().replace(/-/g,'').slice(0,12),
-    content: [{ type: 'output_text', text: modelCfg.response }] });
+    content: [{ type: 'output_text', text: modelCfg.response || '', annotations: [] }] });
+  // usage
+  let usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+  if (modelCfg.usage) {
+    try { usage = typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage; } catch {}
+  }
   return {
     id: 'resp_' + crypto.randomUUID().replace(/-/g,'').slice(0,24),
     object: 'response', created_at: Math.floor(Date.now()/1000),
     model: modelId, output: out, status: 'completed',
-    usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
+    usage
   };
 }
 
 async function handleResponses(request, config) {
-  let body;
-  try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON body'), 400); }
-  const modelId = body.model || config.default_model_id;
-  const model = resolveModel(config, modelId);
-  if (!model) return json(makeError(404, `Model '${modelId}' not found`), 404);
-  if (model.error_mode) {
-    const err = model.error || config.default_error;
-    return json(makeError(err.code, err.message), err.code);
+  try {
+    let body;
+    try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON body'), 400, config); }
+    const modelId = body.model || config.default_model_id;
+    const model = resolveModel(config, modelId);
+    if (!model) return json(makeError(404, `Model '${modelId}' not found`), 404, config);
+    if (model.error_mode) {
+      const err = model.error || config.default_error;
+      return json(makeError(err.code, err.message), err.code, config);
+    }
+    const delay = (model.delay_ms||0) + (config.global_delay_ms||0);
+    if (delay > 0) await sleep(delay);
+    if (body.stream) return streamResponses(modelId, model);
+    return json(makeResponsesResult(modelId, model), 200, config);
+  } catch(e) {
+    return json(makeError(500, 'Internal error: ' + (e.message || String(e))), 500, config);
   }
-  const delay = (model.delay_ms||0) + (config.global_delay_ms||0);
-  if (delay > 0) await sleep(delay);
-  if (body.stream) return streamResponses(modelId, model);
-  return json(makeResponsesResult(modelId, model));
 }
 
 function streamResponses(modelId, model) {
@@ -341,19 +364,26 @@ function streamResponses(modelId, model) {
 
   const stream = new ReadableStream({
     async start(ctrl) {
-      ctrl.enqueue(ev('response.created', { type:'response.created', response: { id:respId, object:'response', model:modelId, status:'in_progress', output:[] } }));
-      // reasoning
+      // 1. response.created
+      ctrl.enqueue(ev('response.created', { type:'response.created', response: { id:respId, object:'response', created_at:Math.floor(Date.now()/1000), model:modelId, status:'in_progress', output:[] } }));
+      // 2. reasoning
       if (model.thinking) {
         ctrl.enqueue(ev('response.reasoning.delta', { type:'response.reasoning.delta', delta: model.thinking }));
       }
-      // text
-      const c = model.response;
+      // 3. text delta
+      const c = model.response || '';
       if (chunkSize > 0) {
         for (let i=0;i<c.length;i+=chunkSize) ctrl.enqueue(ev('response.output_text.delta', { type:'response.output_text.delta', delta: c.slice(i,i+chunkSize) }));
       } else {
         ctrl.enqueue(ev('response.output_text.delta', { type:'response.output_text.delta', delta: c }));
       }
-      ctrl.enqueue(ev('response.completed', { type:'response.completed', response: { id:respId, object:'response', model:modelId, status:'completed', output:[] } }));
+      ctrl.enqueue(ev('response.output_text.done', { type:'response.output_text.done', text: c }));
+      // 4. response.completed — 完整结构
+      let usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+      if (model.usage) {
+        try { usage = typeof model.usage === 'string' ? JSON.parse(model.usage) : model.usage; } catch {}
+      }
+      ctrl.enqueue(ev('response.completed', { type:'response.completed', response: { id:respId, object:'response', created_at:Math.floor(Date.now()/1000), model:modelId, status:'completed', output: [{ type:'message', role:'assistant', content:[{ type:'output_text', text:c, annotations:[] }] }], usage } }));
       ctrl.close();
     }
   });
