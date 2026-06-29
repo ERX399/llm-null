@@ -37,8 +37,14 @@ function resolveModel(config, modelId) {
   return config.models?.[modelId] || null;
 }
 
-// 构造 OpenAI chat completion 响应
+// 构造 OpenAI chat completion 响应（支持深度思考 reasoning_content）
 function makeChatCompletion(modelId, content, modelCfg) {
+  const message = { role: 'assistant', content };
+  // 深度思考内容（reasoning_content / thinking）
+  if (modelCfg.thinking) {
+    message.reasoning_content = modelCfg.thinking;
+    message.thinking = modelCfg.thinking;
+  }
   return {
     id: genId(),
     object: 'chat.completion',
@@ -46,7 +52,7 @@ function makeChatCompletion(modelId, content, modelCfg) {
     model: modelId,
     choices: [{
       index: 0,
-      message: { role: 'assistant', content },
+      message,
       finish_reason: 'stop'
     }],
     usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
@@ -129,38 +135,34 @@ function streamResponse(modelId, content, model, body) {
   const id = genId();
   const created = Math.floor(Date.now() / 1000);
   const chunkSize = model.stream_chunk_size > 0 ? model.stream_chunk_size : content.length;
-
   const encoder = new TextEncoder();
+
+  function sendChunk(delta) {
+    const data = {
+      id, object: 'chat.completion.chunk', created, model: modelId,
+      choices: [{ index: 0, delta, finish_reason: null }]
+    };
+    return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
+  }
 
   const stream = new ReadableStream({
     async start(controller) {
-      // 分块输出
-      for (let i = 0; i < content.length; i += chunkSize) {
-        const chunk = content.slice(i, i + chunkSize);
-        const data = {
-          id,
-          object: 'chat.completion.chunk',
-          created,
-          model: modelId,
-          choices: [{
-            index: 0,
-            delta: { content: chunk },
-            finish_reason: null
-          }]
-        };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      // 1. 先输出深度思考内容
+      if (model.thinking) {
+        const tSize = chunkSize;
+        for (let i = 0; i < model.thinking.length; i += tSize) {
+          const tChunk = model.thinking.slice(i, i + tSize);
+          controller.enqueue(sendChunk({ reasoning_content: tChunk, thinking: tChunk }));
+        }
       }
-      // 结束
+      // 2. 再输出正文回复
+      for (let i = 0; i < content.length; i += chunkSize) {
+        controller.enqueue(sendChunk({ content: content.slice(i, i + chunkSize) }));
+      }
+      // 3. 结束
       const done = {
-        id,
-        object: 'chat.completion.chunk',
-        created,
-        model: modelId,
-        choices: [{
-          index: 0,
-          delta: {},
-          finish_reason: 'stop'
-        }]
+        id, object: 'chat.completion.chunk', created, model: modelId,
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
       };
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(done)}\n\n`));
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
@@ -175,6 +177,171 @@ function streamResponse(modelId, content, model, body) {
       'Connection': 'keep-alive'
     }
   });
+}
+
+// ============================================================
+//  Anthropic Claude 兼容接口
+// ============================================================
+
+function claudeErrorType(code) {
+  const m = {400:'invalid_request_error',401:'authentication_error',403:'permission_denied_error',404:'not_found_error',429:'rate_limit_error',500:'api_error',529:'overloaded_error'};
+  return m[code] || 'api_error';
+}
+
+function makeClaudeError(code, message) {
+  return { type: 'error', error: { type: claudeErrorType(code), message } };
+}
+
+function makeClaudeMessage(modelId, modelCfg) {
+  const content = [];
+  if (modelCfg.thinking) content.push({ type: 'thinking', thinking: modelCfg.thinking });
+  content.push({ type: 'text', text: modelCfg.response });
+  return {
+    id: 'msg_' + crypto.randomUUID().replace(/-/g,'').slice(0,24),
+    type: 'message', role: 'assistant', model: modelId, content,
+    stop_reason: 'end_turn', stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 }
+  };
+}
+
+function makeClaudeModelsList(config) {
+  return { data: Object.values(config.models||{}).map(m => ({
+    id: m.id, display_name: m.name,
+    created_at: Math.floor(Date.now()/1000), type: 'model'
+  }))};
+}
+
+async function handleClaudeMessages(request, config) {
+  let body;
+  try { body = await request.json(); } catch { return json(makeClaudeError(400, 'Invalid JSON body'), 400, config); }
+  const modelId = body.model || config.default_model_id;
+  const model = resolveModel(config, modelId);
+  if (!model) return json(makeClaudeError(404, `Model '${modelId}' not found`), 404, config);
+  if (model.error_mode) {
+    const err = model.error || config.default_error;
+    return json(makeClaudeError(err.code, err.message), err.code, config);
+  }
+  const delay = (model.delay_ms||0) + (config.global_delay_ms||0);
+  if (delay > 0) await sleep(delay);
+  if (body.stream) return streamClaudeResponse(modelId, model);
+  return json(makeClaudeMessage(modelId, model), 200, config);
+}
+
+function streamClaudeResponse(modelId, model) {
+  const msgId = 'msg_' + crypto.randomUUID().replace(/-/g,'').slice(0,24);
+  const enc = new TextEncoder();
+  const chunkSize = model.stream_chunk_size > 0 ? model.stream_chunk_size : 0;
+
+  function ev(type, data) {
+    return enc.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  const stream = new ReadableStream({
+    async start(ctrl) {
+      ctrl.enqueue(ev('message_start', { type:'message_start', message: { id:msgId, type:'message', role:'assistant', content:[], model:modelId, stop_reason:null, stop_sequence:null, usage:{input_tokens:0,output_tokens:0} } }));
+      // thinking
+      if (model.thinking) {
+        ctrl.enqueue(ev('content_block_start', { type:'content_block_start', index:0, content_block:{ type:'thinking', thinking:'' } }));
+        const t = model.thinking;
+        if (chunkSize > 0) {
+          for (let i=0;i<t.length;i+=chunkSize) ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'thinking_delta', thinking:t.slice(i,i+chunkSize) } }));
+        } else {
+          ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'thinking_delta', thinking:t } }));
+        }
+        ctrl.enqueue(ev('content_block_stop', { type:'content_block_stop', index:0 }));
+        // text block at index 1
+        ctrl.enqueue(ev('content_block_start', { type:'content_block_start', index:1, content_block:{ type:'text', text:'' } }));
+        const c = model.response;
+        if (chunkSize > 0) {
+          for (let i=0;i<c.length;i+=chunkSize) ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:1, delta:{ type:'text_delta', text:c.slice(i,i+chunkSize) } }));
+        } else {
+          ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:1, delta:{ type:'text_delta', text:c } }));
+        }
+        ctrl.enqueue(ev('content_block_stop', { type:'content_block_stop', index:1 }));
+      } else {
+        // text block at index 0 only
+        ctrl.enqueue(ev('content_block_start', { type:'content_block_start', index:0, content_block:{ type:'text', text:'' } }));
+        const c = model.response;
+        if (chunkSize > 0) {
+          for (let i=0;i<c.length;i+=chunkSize) ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'text_delta', text:c.slice(i,i+chunkSize) } }));
+        } else {
+          ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'text_delta', text:c } }));
+        }
+        ctrl.enqueue(ev('content_block_stop', { type:'content_block_stop', index:0 }));
+      }
+      ctrl.enqueue(ev('message_delta', { type:'message_delta', delta:{ stop_reason:'end_turn', stop_sequence:null }, usage:{ output_tokens:0 } }));
+      ctrl.enqueue(ev('message_stop', { type:'message_stop' }));
+      ctrl.close();
+    }
+  });
+
+  return new Response(stream, { headers: { 'Content-Type':'text/event-stream; charset=utf-8', 'Cache-Control':'no-cache', 'Connection':'keep-alive' } });
+}
+
+// ============================================================
+//  OpenAI Responses API (/v1/responses)
+// ============================================================
+
+function makeResponsesResult(modelId, modelCfg) {
+  const out = [];
+  if (modelCfg.thinking) {
+    out.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: modelCfg.thinking }] });
+  }
+  out.push({ type: 'message', role: 'assistant', id: 'msg_' + crypto.randomUUID().replace(/-/g,'').slice(0,12),
+    content: [{ type: 'output_text', text: modelCfg.response }] });
+  return {
+    id: 'resp_' + crypto.randomUUID().replace(/-/g,'').slice(0,24),
+    object: 'response', created_at: Math.floor(Date.now()/1000),
+    model: modelId, output: out, status: 'completed',
+    usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
+  };
+}
+
+async function handleResponses(request, config) {
+  let body;
+  try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON body'), 400); }
+  const modelId = body.model || config.default_model_id;
+  const model = resolveModel(config, modelId);
+  if (!model) return json(makeError(404, `Model '${modelId}' not found`), 404);
+  if (model.error_mode) {
+    const err = model.error || config.default_error;
+    return json(makeError(err.code, err.message), err.code);
+  }
+  const delay = (model.delay_ms||0) + (config.global_delay_ms||0);
+  if (delay > 0) await sleep(delay);
+  if (body.stream) return streamResponses(modelId, model);
+  return json(makeResponsesResult(modelId, model));
+}
+
+function streamResponses(modelId, model) {
+  const respId = 'resp_' + crypto.randomUUID().replace(/-/g,'').slice(0,24);
+  const enc = new TextEncoder();
+  const chunkSize = model.stream_chunk_size > 0 ? model.stream_chunk_size : 0;
+
+  function ev(type, data) {
+    return enc.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  const stream = new ReadableStream({
+    async start(ctrl) {
+      ctrl.enqueue(ev('response.created', { type:'response.created', response: { id:respId, object:'response', model:modelId, status:'in_progress', output:[] } }));
+      // reasoning
+      if (model.thinking) {
+        ctrl.enqueue(ev('response.reasoning.delta', { type:'response.reasoning.delta', delta: model.thinking }));
+      }
+      // text
+      const c = model.response;
+      if (chunkSize > 0) {
+        for (let i=0;i<c.length;i+=chunkSize) ctrl.enqueue(ev('response.output_text.delta', { type:'response.output_text.delta', delta: c.slice(i,i+chunkSize) }));
+      } else {
+        ctrl.enqueue(ev('response.output_text.delta', { type:'response.output_text.delta', delta: c }));
+      }
+      ctrl.enqueue(ev('response.completed', { type:'response.completed', response: { id:respId, object:'response', model:modelId, status:'completed', output:[] } }));
+      ctrl.close();
+    }
+  });
+
+  return new Response(stream, { headers: { 'Content-Type':'text/event-stream; charset=utf-8', 'Cache-Control':'no-cache', 'Connection':'keep-alive' } });
 }
 
 // ============================================================
@@ -223,6 +390,7 @@ async function handleAdmin(method, pathname, request, config, env) {
       name: body.name || mid,
       number: body.number || maxNum + 1,
       response: body.response || '默认回复',
+      thinking: body.thinking || '',
       error_mode: body.error_mode || false,
       error: body.error || config.default_error,
       delay_ms: body.delay_ms || 0,
@@ -256,6 +424,17 @@ async function handleAdmin(method, pathname, request, config, env) {
     m.response = body.response ?? '';
     const ok = await saveConfig(env, config);
     return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, response: m.response });
+  }
+
+  // PUT /api/models/:id/thinking — 修改深度思考内容
+  params = matchRoute(method, pathname, 'PUT /api/models/:id/thinking');
+  if (params !== null) {
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    const m = config.models?.[params.id];
+    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    m.thinking = body.thinking ?? '';
+    const ok = await saveConfig(env, config);
+    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, thinking: m.thinking });
   }
 
   // PUT /api/models/:id/error — 设置错误模式
@@ -386,14 +565,21 @@ function consoleHTML(config) {
     <div class="card">
       <h2>📡 API 接口</h2>
       <div class="api-info">
+        <div class="row" style="border-top:2px solid #334155;padding-top:6px;margin-top:4px"><span style="color:#f59e0b;font-weight:600">OpenAI 格式</span><code></code></div>
         <div class="row"><span>聊天补全</span><code>POST /v1/chat/completions</code></div>
+        <div class="row"><span>Responses API</span><code>POST /v1/responses</code></div>
         <div class="row"><span>模型列表</span><code>GET /v1/models</code></div>
+        <div class="row" style="border-top:2px solid #334155;padding-top:6px;margin-top:4px"><span style="color:#a855f7;font-weight:600">Claude 格式</span><code></code></div>
+        <div class="row"><span>Claude 对话</span><code>POST /v1/messages</code></div>
+        <div class="row"><span>兼容路径</span><code>POST /claude/v1/messages</code></div>
+        <div class="row"><span>Claude 模型</span><code>GET /anthropic/v1/models</code></div>
         <div class="row"><span>获取配置</span><code>GET /api/config</code></div>
         <div class="row"><span>更新配置</span><code>PUT /api/config</code></div>
         <div class="row"><span>部分更新</span><code>PATCH /api/config</code></div>
         <div class="row"><span>新增模型</span><code>POST /api/models</code></div>
         <div class="row"><span>更新模型</span><code>PUT /api/models/:id</code></div>
         <div class="row"><span>修改回复</span><code>PUT /api/models/:id/response</code></div>
+        <div class="row"><span>深度思考</span><code>PUT /api/models/:id/thinking</code></div>
         <div class="row"><span>错误模式</span><code>PUT /api/models/:id/error</code></div>
         <div class="row"><span>删除模型</span><code>DELETE /api/models/:id</code></div>
         <div class="row"><span>健康检查</span><code>GET /health</code></div>
@@ -454,6 +640,7 @@ async function loadModels() {
         <span class="id">#\${m.number} · \${m.id}</span>
       </div>
       <div style="margin-top:6px;font-size:0.85rem;color:#94a3b8">回复: \${m.response.slice(0,50)}\${m.response.length>50?'...':''}</div>
+      \${m.thinking ? '<div style="margin-top:2px;font-size:0.8rem;color:#7c3aed">思考: '+m.thinking.slice(0,40)+(m.thinking.length>40?'...':'')+'</div>' : ''}
       <div class="actions">
         <button class="btn btn-primary btn-sm" onclick="editModel('\${m.id}')">编辑</button>
         <button class="btn btn-sm" style="background:#f59e0b;color:#000" onclick="toggleError('\${m.id}', \${!m.error_mode})">\${m.error_mode?'关闭错误':'开启错误'}</button>
@@ -491,6 +678,7 @@ async function editModel(id) {
     <div class="form-row"><label>显示名称</label><input type="text" id="editName" value="\${m.name}"></div>
     <div class="form-row"><label>编号</label><input type="number" id="editNumber" value="\${m.number}"></div>
     <div class="form-row"><label>回复文本</label><textarea id="editResponse" style="min-height:100px">\${m.response}</textarea></div>
+    <div class="form-row"><label>深度思考 (thinking)</label><textarea id="editThinking" style="min-height:80px" placeholder="深度思考内容，留空则不输出">\${m.thinking||''}</textarea></div>
     <div class="form-row"><label>延迟 (ms)</label><input type="number" id="editDelay" value="\${m.delay_ms||0}"></div>
     <div class="form-row"><label>max_tokens</label><input type="number" id="editMaxTokens" value="\${m.max_tokens||4096}"></div>
     <div class="form-row"><label>temperature</label><input type="text" id="editTemp" value="\${m.temperature||1.0}"></div>
@@ -513,6 +701,7 @@ async function saveModel(id) {
     name: document.getElementById('editName').value,
     number: parseInt(document.getElementById('editNumber').value),
     response: document.getElementById('editResponse').value,
+    thinking: document.getElementById('editThinking').value,
     delay_ms: parseInt(document.getElementById('editDelay').value),
     max_tokens: parseInt(document.getElementById('editMaxTokens').value),
     temperature: parseFloat(document.getElementById('editTemp').value),
@@ -613,6 +802,21 @@ export default {
     // OpenAI: 聊天补全
     if (matchRoute(method, pathname, 'POST /v1/chat/completions') || matchRoute(method, pathname, 'POST /chat/completions')) {
       return await handleChatCompletions(request, config);
+    }
+
+    // OpenAI: Responses API
+    if (matchRoute(method, pathname, 'POST /v1/responses') || matchRoute(method, pathname, 'POST /responses')) {
+      return await handleResponses(request, config);
+    }
+
+    // Claude: 模型列表
+    if (matchRoute(method, pathname, 'GET /v1/models') === null && (matchRoute(method, pathname, 'GET /claude/v1/models') || matchRoute(method, pathname, 'GET /anthropic/v1/models'))) {
+      return json(makeClaudeModelsList(config), 200, config);
+    }
+
+    // Claude: Messages
+    if (matchRoute(method, pathname, 'POST /v1/messages') || matchRoute(method, pathname, 'POST /claude/v1/messages') || matchRoute(method, pathname, 'POST /anthropic/v1/messages')) {
+      return await handleClaudeMessages(request, config);
     }
 
     // 管理接口
