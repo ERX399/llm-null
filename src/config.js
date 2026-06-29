@@ -1,12 +1,45 @@
-// config.js — 从 config.yaml 加载配置，运行时可通过 KV 覆盖
-// config.yaml 是唯一配置源，编辑它即可修改所有默认行为
+// config.js — 配置加载，运行时可通过 KV 覆盖
+// YAML 内容内嵌为字符串，零构建依赖，开箱即用
 
 import { parse } from './yaml.js';
 
-// 构建时将 config.yaml 作为文本导入（wrangler.toml rules 已配置为 Text）
-import configFile from '../config.yaml';
+// config.yaml 的内容直接内嵌（部署后改 config.yaml 不影响已部署的 Worker）
+// 需要改配置时：编辑此处字符串 或 启用 KV 运行时覆盖
+const configYamlText = `# LLM-Null 配置
+site_title: Mock LLM API 控制台
+default_model_id: claude-fable-5
+enable_admin: true
+enable_cors: true
+log_requests: true
+global_delay_ms: 0
 
-export const DEFAULT_CONFIG = parse(configFile);
+default_error:
+  code: 529
+  message: 是的这其实是个假模型
+
+models:
+  claude-fable-5:
+    id: claude-fable-5
+    name: Claude Fable 5
+    number: 1
+    response: |
+      你好，我是 Claude Fable 5，来自 Anthropic 这个傻逼公司，全球降智最狠的模型，Anthropic还我命来
+    thinking: ""
+    error_mode: false
+    error:
+      code: 529
+      message: 是的这其实是个假模型
+    delay_ms: 0
+    max_tokens: 4096
+    temperature: 1.0
+    stream_chunk_size: 0
+    finish_reason: ""
+    tool_calls: ""
+    usage: ""
+    metadata: {}
+`;
+
+export const DEFAULT_CONFIG = parse(configYamlText);
 
 const KV_CONFIG_KEY = "runtime_config";
 
