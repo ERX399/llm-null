@@ -1,0 +1,629 @@
+// index.js — Mock LLM API for Cloudflare Worker
+// OpenAI 兼容固定回复 API + Web 控制台 + 高自由度配置管理
+
+import { DEFAULT_CONFIG, getConfig, saveConfig, deepMerge } from './config.js';
+
+// ============================================================
+//  工具函数
+// ============================================================
+
+function json(data, status = 200, config = null) {
+  const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+  if (config?.enable_cors) {
+    headers['Access-Control-Allow-Origin'] = '*';
+    headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
+    headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization';
+  }
+  return new Response(JSON.stringify(data, null, 2), { status, headers });
+}
+
+function html(content) {
+  return new Response(content, {
+    headers: { 'Content-Type': 'text/html; charset=utf-8' }
+  });
+}
+
+function genId() {
+  return 'chatcmpl-' + crypto.randomUUID().replace(/-/g, '').slice(0, 24);
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// 从 models 对象中取 model 或回退到 default_model_id
+function resolveModel(config, modelId) {
+  if (!modelId) modelId = config.default_model_id;
+  return config.models?.[modelId] || null;
+}
+
+// 构造 OpenAI chat completion 响应
+function makeChatCompletion(modelId, content, modelCfg) {
+  return {
+    id: genId(),
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: modelId,
+    choices: [{
+      index: 0,
+      message: { role: 'assistant', content },
+      finish_reason: 'stop'
+    }],
+    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+  };
+}
+
+function makeModelsList(config) {
+  return {
+    object: 'list',
+    data: Object.values(config.models || {}).map(m => ({
+      id: m.id,
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'mock',
+      name: m.name,
+      number: m.number
+    }))
+  };
+}
+
+function makeError(code, message) {
+  return { error: { code, message, type: 'mock_error' } };
+}
+
+// 路由匹配
+function matchRoute(method, pathname, pattern) {
+  // pattern 例: 'GET /api/models/:id/response'
+  const [pMethod, ...pParts] = pattern.split(' ');
+  const pPath = pParts.join(' ');
+  if (pMethod !== method) return null;
+
+  const pSegs = pPath.split('/').filter(Boolean);
+  const aSegs = pathname.split('/').filter(Boolean);
+  if (pSegs.length !== aSegs.length) return null;
+
+  const params = {};
+  for (let i = 0; i < pSegs.length; i++) {
+    if (pSegs[i].startsWith(':')) {
+      params[pSegs[i].slice(1)] = decodeURIComponent(aSegs[i]);
+    } else if (pSegs[i] !== aSegs[i]) {
+      return null;
+    }
+  }
+  return params;
+}
+
+// ============================================================
+//  OpenAI 兼容接口
+// ============================================================
+
+async function handleChatCompletions(request, config) {
+  let body;
+  try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON body'), 400); }
+
+  const modelId = body.model || config.default_model_id;
+  const model = resolveModel(config, modelId);
+  if (!model) return json(makeError(404, `Model '${modelId}' not found`), 404);
+
+  // 错误模式
+  if (model.error_mode) {
+    const err = model.error || config.default_error;
+    return json(makeError(err.code, err.message), err.code);
+  }
+
+  // 延迟
+  const delay = (model.delay_ms || 0) + (config.global_delay_ms || 0);
+  if (delay > 0) await sleep(delay);
+
+  const content = model.response;
+
+  // 流式
+  if (body.stream) {
+    return streamResponse(modelId, content, model, body);
+  }
+
+  return json(makeChatCompletion(modelId, content, model));
+}
+
+function streamResponse(modelId, content, model, body) {
+  const id = genId();
+  const created = Math.floor(Date.now() / 1000);
+  const chunkSize = model.stream_chunk_size > 0 ? model.stream_chunk_size : content.length;
+
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      // 分块输出
+      for (let i = 0; i < content.length; i += chunkSize) {
+        const chunk = content.slice(i, i + chunkSize);
+        const data = {
+          id,
+          object: 'chat.completion.chunk',
+          created,
+          model: modelId,
+          choices: [{
+            index: 0,
+            delta: { content: chunk },
+            finish_reason: null
+          }]
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      }
+      // 结束
+      const done = {
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model: modelId,
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: 'stop'
+        }]
+      };
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(done)}\n\n`));
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    }
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    }
+  });
+}
+
+// ============================================================
+//  管理接口
+// ============================================================
+
+async function handleAdmin(method, pathname, request, config, env) {
+  if (!config.enable_admin) return json(makeError(403, 'Admin API disabled'), 403);
+
+  // GET /api/config
+  let params = matchRoute(method, pathname, 'GET /api/config');
+  if (params !== null) return json(config);
+
+  // PUT /api/config — 全量替换
+  params = matchRoute(method, pathname, 'PUT /api/config');
+  if (params !== null) {
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    const ok = await saveConfig(env, body);
+    return json({ status: ok ? 'saved' : 'no_kv', config: body });
+  }
+
+  // PATCH /api/config — 部分更新
+  params = matchRoute(method, pathname, 'PATCH /api/config');
+  if (params !== null) {
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    const merged = deepMerge(config, body);
+    const ok = await saveConfig(env, merged);
+    return json({ status: ok ? 'saved' : 'no_kv', config: merged });
+  }
+
+  // GET /api/models
+  params = matchRoute(method, pathname, 'GET /api/models');
+  if (params !== null) return json({ models: config.models || {} });
+
+  // POST /api/models — 新增模型
+  params = matchRoute(method, pathname, 'POST /api/models');
+  if (params !== null) {
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    const mid = body.id || '';
+    if (!mid) return json(makeError(400, 'Field "id" is required'), 400);
+    if (!config.models) config.models = {};
+    if (config.models[mid]) return json(makeError(409, `Model '${mid}' already exists`), 409);
+    const maxNum = Math.max(0, ...Object.values(config.models).map(m => m.number || 0));
+    config.models[mid] = {
+      id: mid,
+      name: body.name || mid,
+      number: body.number || maxNum + 1,
+      response: body.response || '默认回复',
+      error_mode: body.error_mode || false,
+      error: body.error || config.default_error,
+      delay_ms: body.delay_ms || 0,
+      max_tokens: body.max_tokens || 4096,
+      temperature: body.temperature || 1.0,
+      stream_chunk_size: body.stream_chunk_size || 0,
+      metadata: body.metadata || {}
+    };
+    const ok = await saveConfig(env, config);
+    return json({ status: ok ? 'created' : 'no_kv', model: config.models[mid] }, 201);
+  }
+
+  // PUT /api/models/:id — 更新模型全配置
+  params = matchRoute(method, pathname, 'PUT /api/models/:id');
+  if (params !== null) {
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    const m = config.models?.[params.id];
+    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    Object.assign(m, body);
+    m.id = params.id; // 防止 id 被改
+    const ok = await saveConfig(env, config);
+    return json({ status: ok ? 'updated' : 'no_kv', model: m });
+  }
+
+  // PUT /api/models/:id/response — 修改回复文本
+  params = matchRoute(method, pathname, 'PUT /api/models/:id/response');
+  if (params !== null) {
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    const m = config.models?.[params.id];
+    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    m.response = body.response ?? '';
+    const ok = await saveConfig(env, config);
+    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, response: m.response });
+  }
+
+  // PUT /api/models/:id/error — 设置错误模式
+  params = matchRoute(method, pathname, 'PUT /api/models/:id/error');
+  if (params !== null) {
+    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400); }
+    const m = config.models?.[params.id];
+    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    if ('error_mode' in body) m.error_mode = body.error_mode;
+    if (body.error) m.error = { ...m.error, ...body.error };
+    const ok = await saveConfig(env, config);
+    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, error_mode: m.error_mode, error: m.error });
+  }
+
+  // DELETE /api/models/:id — 删除模型
+  params = matchRoute(method, pathname, 'DELETE /api/models/:id');
+  if (params !== null) {
+    if (!config.models?.[params.id]) return json(makeError(404, `Model '${params.id}' not found`), 404);
+    delete config.models[params.id];
+    const ok = await saveConfig(env, config);
+    return json({ status: ok ? 'deleted' : 'no_kv', model_id: params.id });
+  }
+
+  return null; // 无匹配
+}
+
+// ============================================================
+//  Web 控制台 (内嵌 HTML)
+// ============================================================
+
+function consoleHTML(config) {
+  const title = config.site_title || 'Mock LLM API';
+  const modelsJSON = JSON.stringify(config.models || {}, null, 2);
+  const configJSON = JSON.stringify({
+    site_title: config.site_title,
+    default_model_id: config.default_model_id,
+    default_error: config.default_error,
+    enable_admin: config.enable_admin,
+    enable_cors: config.enable_cors,
+    log_requests: config.log_requests,
+    global_delay_ms: config.global_delay_ms
+  }, null, 2);
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${title}</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; }
+  .container { max-width:1200px; margin:0 auto; padding:20px; }
+  h1 { font-size:1.6rem; margin-bottom:8px; }
+  .subtitle { color:#94a3b8; font-size:0.9rem; margin-bottom:24px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media(max-width:768px){ .grid{ grid-template-columns:1fr; } }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:20px; }
+  .card h2 { font-size:1.1rem; margin-bottom:12px; color:#38bdf8; }
+  .card h3 { font-size:0.95rem; margin:12px 0 6px; color:#94a3b8; }
+  textarea { width:100%; min-height:300px; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:12px; font-family:"Cascadia Code", "Fira Code", monospace; font-size:0.85rem; resize:vertical; }
+  textarea:focus { outline:none; border-color:#38bdf8; }
+  .btn { display:inline-block; padding:8px 20px; border:none; border-radius:8px; font-size:0.9rem; cursor:pointer; transition:all .15s; }
+  .btn-primary { background:#3b82f6; color:#fff; }
+  .btn-primary:hover { background:#2563eb; }
+  .btn-danger { background:#ef4444; color:#fff; }
+  .btn-danger:hover { background:#dc2626; }
+  .btn-sm { padding:4px 12px; font-size:0.8rem; }
+  .btn-row { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .model-list { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+  .model-item { background:#0f172a; border:1px solid #334155; border-radius:8px; padding:12px; }
+  .model-item .name { font-weight:600; color:#f1f5f9; }
+  .model-item .id { color:#64748b; font-size:0.8rem; }
+  .model-item .actions { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:0.75rem; }
+  .badge-on { background:#ef4444; color:#fff; }
+  .badge-off { background:#22c55e; color:#fff; }
+  .toast { position:fixed; top:20px; right:20px; padding:12px 24px; border-radius:8px; color:#fff; z-index:999; opacity:0; transition:opacity .2s; }
+  .toast.show { opacity:1; }
+  .toast-ok { background:#22c55e; }
+  .toast-err { background:#ef4444; }
+  .api-info { background:#0f172a; border:1px solid #334155; border-radius:8px; padding:12px; font-size:0.8rem; }
+  .api-info code { color:#38bdf8; }
+  .api-info .row { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid #1e293b; }
+  .api-info .row:last-child{ border:none; }
+  input[type="text"], input[type="number"] { width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:6px 10px; font-size:0.85rem; }
+  input:focus{ outline:none; border-color:#38bdf8; }
+  label { font-size:0.8rem; color:#94a3b8; display:block; margin-bottom:3px; }
+  .form-row { margin-bottom:10px; }
+  .switch { display:flex; align-items:center; gap:8px; }
+  .switch input { width:auto; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🧩 ${title}</h1>
+  <p class="subtitle">Mock LLM API — 固定回复 / 错误模拟 / 多模型管理</p>
+
+  <div class="grid">
+    <!-- 模型列表 -->
+    <div class="card">
+      <h2>📋 模型列表</h2>
+      <div class="model-list" id="modelList">加载中...</div>
+      <div class="btn-row">
+        <button class="btn btn-primary btn-sm" onclick="openCreateModal()">+ 新增模型</button>
+        <button class="btn btn-sm" style="background:#475569;color:#fff" onclick="loadModels()">刷新</button>
+      </div>
+    </div>
+
+    <!-- 配置编辑器 -->
+    <div class="card">
+      <h2>⚙️ 全局配置</h2>
+      <p style="font-size:0.8rem;color:#64748b;margin-bottom:8px">修改后点保存，立即生效（写入 KV）</p>
+      <textarea id="configEditor">${configJSON}</textarea>
+      <div class="btn-row">
+        <button class="btn btn-primary btn-sm" onclick="saveConfig()">保存配置</button>
+        <button class="btn btn-sm" style="background:#475569;color:#fff" onclick="loadConfig()">重载</button>
+      </div>
+    </div>
+
+    <!-- 模型编辑器 -->
+    <div class="card" id="modelEditorCard" style="display:none">
+      <h2>✏️ 编辑模型</h2>
+      <div id="modelEditorBody"></div>
+    </div>
+
+    <!-- API 信息 -->
+    <div class="card">
+      <h2>📡 API 接口</h2>
+      <div class="api-info">
+        <div class="row"><span>聊天补全</span><code>POST /v1/chat/completions</code></div>
+        <div class="row"><span>模型列表</span><code>GET /v1/models</code></div>
+        <div class="row"><span>获取配置</span><code>GET /api/config</code></div>
+        <div class="row"><span>更新配置</span><code>PUT /api/config</code></div>
+        <div class="row"><span>部分更新</span><code>PATCH /api/config</code></div>
+        <div class="row"><span>新增模型</span><code>POST /api/models</code></div>
+        <div class="row"><span>更新模型</span><code>PUT /api/models/:id</code></div>
+        <div class="row"><span>修改回复</span><code>PUT /api/models/:id/response</code></div>
+        <div class="row"><span>错误模式</span><code>PUT /api/models/:id/error</code></div>
+        <div class="row"><span>删除模型</span><code>DELETE /api/models/:id</code></div>
+        <div class="row"><span>健康检查</span><code>GET /health</code></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 新增模型弹窗 -->
+<div id="createModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:100;align-items:center;justify-content:center">
+  <div class="card" style="width:400px;max-width:90vw">
+    <h2>新增模型</h2>
+    <div class="form-row"><label>模型 ID</label><input type="text" id="newId" placeholder="my-model"></div>
+    <div class="form-row"><label>显示名称</label><input type="text" id="newName" placeholder="My Model"></div>
+    <div class="form-row"><label>回复文本</label><input type="text" id="newResponse" placeholder="固定回复内容"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary btn-sm" onclick="createModel()">创建</button>
+      <button class="btn btn-sm" style="background:#475569;color:#fff" onclick="closeCreateModal()">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';
+function toast(msg, ok=true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(API + path, opts);
+  const data = await res.json();
+  if (!res.ok) { toast(data.error?.message || 'Error', false); throw new Error(JSON.stringify(data)); }
+  return data;
+}
+
+async function loadModels() {
+  const data = await api('GET', '/api/models');
+  const list = document.getElementById('modelList');
+  list.innerHTML = '';
+  const models = Object.values(data.models).sort((a,b) => (a.number||0)-(b.number||0));
+  if (models.length === 0) { list.innerHTML = '<p style="color:#64748b">暂无模型</p>'; return; }
+  for (const m of models) {
+    const div = document.createElement('div');
+    div.className = 'model-item';
+    div.innerHTML = \`
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <span class="name">\${m.name}</span>
+          <span class="badge \${m.error_mode?'badge-on':'badge-off'}" style="margin-left:8px">\${m.error_mode?'错误':'正常'}</span>
+        </div>
+        <span class="id">#\${m.number} · \${m.id}</span>
+      </div>
+      <div style="margin-top:6px;font-size:0.85rem;color:#94a3b8">回复: \${m.response.slice(0,50)}\${m.response.length>50?'...':''}</div>
+      <div class="actions">
+        <button class="btn btn-primary btn-sm" onclick="editModel('\${m.id}')">编辑</button>
+        <button class="btn btn-sm" style="background:#f59e0b;color:#000" onclick="toggleError('\${m.id}', \${!m.error_mode})">\${m.error_mode?'关闭错误':'开启错误'}</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteModel('\${m.id}')">删除</button>
+      </div>\`;
+    list.appendChild(div);
+  }
+}
+
+async function loadConfig() {
+  const data = await api('GET', '/api/config');
+  const cfg = { site_title: data.site_title, default_model_id: data.default_model_id, default_error: data.default_error, enable_admin: data.enable_admin, enable_cors: data.enable_cors, log_requests: data.log_requests, global_delay_ms: data.global_delay_ms };
+  document.getElementById('configEditor').value = JSON.stringify(cfg, null, 2);
+  toast('配置已重载');
+}
+
+async function saveConfig() {
+  try {
+    const body = JSON.parse(document.getElementById('configEditor').value);
+    await api('PATCH', '/api/config', body);
+    toast('配置已保存');
+    loadModels();
+  } catch(e) { toast('JSON 格式错误', false); }
+}
+
+async function editModel(id) {
+  const data = await api('GET', '/api/models');
+  const m = data.models[id];
+  if (!m) return;
+  const card = document.getElementById('modelEditorCard');
+  const body = document.getElementById('modelEditorBody');
+  card.style.display = 'block';
+  body.innerHTML = \`
+    <div class="form-row"><label>模型 ID</label><input type="text" id="editId" value="\${m.id}" disabled></div>
+    <div class="form-row"><label>显示名称</label><input type="text" id="editName" value="\${m.name}"></div>
+    <div class="form-row"><label>编号</label><input type="number" id="editNumber" value="\${m.number}"></div>
+    <div class="form-row"><label>回复文本</label><textarea id="editResponse" style="min-height:100px">\${m.response}</textarea></div>
+    <div class="form-row"><label>延迟 (ms)</label><input type="number" id="editDelay" value="\${m.delay_ms||0}"></div>
+    <div class="form-row"><label>max_tokens</label><input type="number" id="editMaxTokens" value="\${m.max_tokens||4096}"></div>
+    <div class="form-row"><label>temperature</label><input type="text" id="editTemp" value="\${m.temperature||1.0}"></div>
+    <div class="form-row"><label>stream 分块大小 (0=不分块)</label><input type="number" id="editChunk" value="\${m.stream_chunk_size||0}"></div>
+    <div class="form-row"><label>错误模式</label><div class="switch"><input type="checkbox" id="editErrorMode" \${m.error_mode?'checked':''}><span>\${m.error_mode?'开启':'关闭'}</span></div></div>
+    <div class="form-row"><label>错误码</label><input type="number" id="editErrCode" value="\${m.error?.code||500}"></div>
+    <div class="form-row"><label>错误消息</label><input type="text" id="editErrMsg" value="\${m.error?.message||''}"></div>
+    <div class="form-row"><label>metadata (JSON)</label><textarea id="editMeta" style="min-height:60px">\${JSON.stringify(m.metadata||{}, null, 2)}</textarea></div>
+    <div class="btn-row">
+      <button class="btn btn-primary btn-sm" onclick="saveModel('\${id}')">保存</button>
+      <button class="btn btn-sm" style="background:#475569;color:#fff" onclick="card=document.getElementById('modelEditorCard').style.display='none'">关闭</button>
+    </div>\`;
+}
+
+async function saveModel(id) {
+  try {
+    const meta = JSON.parse(document.getElementById('editMeta').value || '{}');
+  } catch { toast('metadata JSON 格式错误', false); return; }
+  const body = {
+    name: document.getElementById('editName').value,
+    number: parseInt(document.getElementById('editNumber').value),
+    response: document.getElementById('editResponse').value,
+    delay_ms: parseInt(document.getElementById('editDelay').value),
+    max_tokens: parseInt(document.getElementById('editMaxTokens').value),
+    temperature: parseFloat(document.getElementById('editTemp').value),
+    stream_chunk_size: parseInt(document.getElementById('editChunk').value),
+    error_mode: document.getElementById('editErrorMode').checked,
+    error: {
+      code: parseInt(document.getElementById('editErrCode').value),
+      message: document.getElementById('editErrMsg').value
+    },
+    metadata: JSON.parse(document.getElementById('editMeta').value || '{}')
+  };
+  await api('PUT', '/api/models/' + id, body);
+  toast('模型已保存');
+  loadModels();
+}
+
+async function toggleError(id, mode) {
+  await api('PUT', '/api/models/' + id + '/error', { error_mode: mode });
+  toast(mode ? '错误模式已开启' : '错误模式已关闭');
+  loadModels();
+}
+
+async function deleteModel(id) {
+  if (!confirm('确认删除模型 ' + id + '?')) return;
+  await api('DELETE', '/api/models/' + id);
+  toast('模型已删除');
+  loadModels();
+}
+
+function openCreateModal() {
+  document.getElementById('createModal').style.display = 'flex';
+}
+function closeCreateModal() {
+  document.getElementById('createModal').style.display = 'none';
+}
+
+async function createModel() {
+  const body = {
+    id: document.getElementById('newId').value,
+    name: document.getElementById('newName').value,
+    response: document.getElementById('newResponse').value
+  };
+  if (!body.id) { toast('模型 ID 不能为空', false); return; }
+  await api('POST', '/api/models', body);
+  toast('模型已创建');
+  closeCreateModal();
+  loadModels();
+}
+
+// 初始化
+loadModels();
+</script>
+</body>
+</html>`;
+}
+
+// ============================================================
+//  主入口
+// ============================================================
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const method = request.method;
+    const pathname = url.pathname;
+
+    // 获取配置
+    const config = await getConfig(env);
+
+    // 日志
+    if (config.log_requests) {
+      console.log(`[${new Date().toISOString()}] ${method} ${pathname}`);
+    }
+
+    // CORS 预检
+    if (method === 'OPTIONS' && config.enable_cors) {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Max-Age': '86400'
+        }
+      });
+    }
+
+    // 健康检查
+    if (matchRoute(method, pathname, 'GET /health')) {
+      return json({ status: 'ok', timestamp: Date.now() });
+    }
+
+    // OpenAI: 列出模型
+    if (matchRoute(method, pathname, 'GET /v1/models') || matchRoute(method, pathname, 'GET /models')) {
+      return json(makeModelsList(config));
+    }
+
+    // OpenAI: 聊天补全
+    if (matchRoute(method, pathname, 'POST /v1/chat/completions') || matchRoute(method, pathname, 'POST /chat/completions')) {
+      return await handleChatCompletions(request, config);
+    }
+
+    // 管理接口
+    const adminResult = await handleAdmin(method, pathname, request, config, env);
+    if (adminResult) return adminResult;
+
+    // Web 控制台
+    if (method === 'GET' && (pathname === '/' || pathname === '')) {
+      return html(consoleHTML(config));
+    }
+
+    return json(makeError(404, `Cannot ${method} ${pathname}`), 404);
+  }
+};
