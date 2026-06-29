@@ -622,6 +622,11 @@ async function api(method, path, body) {
   return data;
 }
 
+function esc(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'"').replace(/'/g,'&#39;').replace(/\\\\/g,'&#92;');
+}
+
 async function loadModels() {
   const data = await api('GET', '/api/models');
   const list = document.getElementById('modelList');
@@ -634,17 +639,17 @@ async function loadModels() {
     div.innerHTML = \`
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
-          <span class="name">\${m.name}</span>
+          <span class="name">\${esc(m.name)}</span>
           <span class="badge \${m.error_mode?'badge-on':'badge-off'}" style="margin-left:8px">\${m.error_mode?'错误':'正常'}</span>
         </div>
-        <span class="id">#\${m.number} · \${m.id}</span>
+        <span class="id">#\${m.number} · \${esc(m.id)}</span>
       </div>
-      <div style="margin-top:6px;font-size:0.85rem;color:#94a3b8">回复: \${m.response.slice(0,50)}\${m.response.length>50?'...':''}</div>
-      \${m.thinking ? '<div style="margin-top:2px;font-size:0.8rem;color:#7c3aed">思考: '+m.thinking.slice(0,40)+(m.thinking.length>40?'...':'')+'</div>' : ''}
+      <div style="margin-top:6px;font-size:0.85rem;color:#94a3b8">回复: \${esc(m.response.slice(0,50))}\${m.response.length>50?'...':''}</div>
+      \${m.thinking ? '<div style="margin-top:2px;font-size:0.8rem;color:#7c3aed">思考: '+esc(m.thinking.slice(0,40))+(m.thinking.length>40?'...':'')+'</div>' : ''}
       <div class="actions">
-        <button class="btn btn-primary btn-sm" onclick="editModel('\${m.id}')">编辑</button>
-        <button class="btn btn-sm" style="background:#f59e0b;color:#000" onclick="toggleError('\${m.id}', \${!m.error_mode})">\${m.error_mode?'关闭错误':'开启错误'}</button>
-        <button class="btn btn-danger btn-sm" onclick="deleteModel('\${m.id}')">删除</button>
+        <button class="btn btn-primary btn-sm" onclick="editModel('\${esc(m.id)}')">编辑</button>
+        <button class="btn btn-sm" style="background:#f59e0b;color:#000" onclick="toggleError('\${esc(m.id)}', \${!m.error_mode})">\${m.error_mode?'关闭错误':'开启错误'}</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteModel('\${esc(m.id)}')">删除</button>
       </div>\`;
     list.appendChild(div);
   }
@@ -674,22 +679,22 @@ async function editModel(id) {
   const body = document.getElementById('modelEditorBody');
   card.style.display = 'block';
   body.innerHTML = \`
-    <div class="form-row"><label>模型 ID</label><input type="text" id="editId" value="\${m.id}" disabled></div>
-    <div class="form-row"><label>显示名称</label><input type="text" id="editName" value="\${m.name}"></div>
+    <div class="form-row"><label>模型 ID</label><input type="text" id="editId" value="\${esc(m.id)}" disabled></div>
+    <div class="form-row"><label>显示名称</label><input type="text" id="editName" value="\${esc(m.name)}"></div>
     <div class="form-row"><label>编号</label><input type="number" id="editNumber" value="\${m.number}"></div>
-    <div class="form-row"><label>回复文本</label><textarea id="editResponse" style="min-height:100px">\${m.response}</textarea></div>
-    <div class="form-row"><label>深度思考 (thinking)</label><textarea id="editThinking" style="min-height:80px" placeholder="深度思考内容，留空则不输出">\${m.thinking||''}</textarea></div>
+    <div class="form-row"><label>回复文本</label><textarea id="editResponse" style="min-height:100px">\${esc(m.response)}</textarea></div>
+    <div class="form-row"><label>深度思考 (thinking)</label><textarea id="editThinking" style="min-height:80px" placeholder="深度思考内容，留空则不输出">\${esc(m.thinking||'')}</textarea></div>
     <div class="form-row"><label>延迟 (ms)</label><input type="number" id="editDelay" value="\${m.delay_ms||0}"></div>
     <div class="form-row"><label>max_tokens</label><input type="number" id="editMaxTokens" value="\${m.max_tokens||4096}"></div>
     <div class="form-row"><label>temperature</label><input type="text" id="editTemp" value="\${m.temperature||1.0}"></div>
     <div class="form-row"><label>stream 分块大小 (0=不分块)</label><input type="number" id="editChunk" value="\${m.stream_chunk_size||0}"></div>
     <div class="form-row"><label>错误模式</label><div class="switch"><input type="checkbox" id="editErrorMode" \${m.error_mode?'checked':''}><span>\${m.error_mode?'开启':'关闭'}</span></div></div>
     <div class="form-row"><label>错误码</label><input type="number" id="editErrCode" value="\${m.error?.code||500}"></div>
-    <div class="form-row"><label>错误消息</label><input type="text" id="editErrMsg" value="\${m.error?.message||''}"></div>
-    <div class="form-row"><label>metadata (JSON)</label><textarea id="editMeta" style="min-height:60px">\${JSON.stringify(m.metadata||{}, null, 2)}</textarea></div>
+    <div class="form-row"><label>错误消息</label><input type="text" id="editErrMsg" value="\${esc(m.error?.message||'')}"></div>
+    <div class="form-row"><label>metadata (JSON)</label><textarea id="editMeta" style="min-height:60px">\${esc(JSON.stringify(m.metadata||{}, null, 2))}</textarea></div>
     <div class="btn-row">
-      <button class="btn btn-primary btn-sm" onclick="saveModel('\${id}')">保存</button>
-      <button class="btn btn-sm" style="background:#475569;color:#fff" onclick="card=document.getElementById('modelEditorCard').style.display='none'">关闭</button>
+      <button class="btn btn-primary btn-sm" onclick="saveModel('\${esc(id)}')">保存</button>
+      <button class="btn btn-sm" style="background:#475569;color:#fff" onclick="document.getElementById('modelEditorCard').style.display='none'">关闭</button>
     </div>\`;
 }
 
