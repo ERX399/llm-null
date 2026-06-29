@@ -1,37 +1,9 @@
-// config.js — 默认配置（与 config.json 同步，部署时打包进 Worker）
-// 运行时可通过 KV 覆盖，也可通过 PUT /api/config 全量替换
+// config.js — 从 config.json 加载配置，运行时可通过 KV 覆盖
+// config.json 是唯一配置源，编辑它即可修改所有默认行为
 
-export const DEFAULT_CONFIG = {
-  "site_title": "Mock LLM API 控制台",
-  "default_model_id": "claude-fable-5",
-  "default_error": {
-    "code": 529,
-    "message": "是的这其实是个假模型"
-  },
-  "enable_admin": true,
-  "enable_cors": true,
-  "log_requests": true,
-  "global_delay_ms": 0,
-  "models": {
-    "claude-fable-5": {
-      "id": "claude-fable-5",
-      "name": "Claude Fable 5",
-      "number": 1,
-      "response": "你好，我是 Claude Fable 5，来自畜生A社公司，全球降智最狠的模型",
-      "thinking": "",
-      "error_mode": false,
-      "error": {
-        "code": 529,
-        "message": "是的这其实是个假模型"
-      },
-      "delay_ms": 0,
-      "max_tokens": 4096,
-      "temperature": 1.0,
-      "stream_chunk_size": 0,
-      "metadata": {}
-    }
-  }
-};
+import configJson from '../config.json';
+
+export const DEFAULT_CONFIG = configJson;
 
 // KV key
 const KV_CONFIG_KEY = "runtime_config";
