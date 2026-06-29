@@ -3,8 +3,8 @@
 
 import { parse } from './yaml.js';
 
-// 构建时将 config.yaml 作为文本导入
-import configFile from '../config.yaml?raw';
+// 构建时将 config.yaml 作为文本导入（wrangler.toml rules 已配置为 Text）
+import configFile from '../config.yaml';
 
 export const DEFAULT_CONFIG = parse(configFile);
 
