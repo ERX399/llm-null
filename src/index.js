@@ -774,6 +774,9 @@ async function editModel(id) {
     <div class="form-row"><label>错误模式</label><div class="switch"><input type="checkbox" id="editErrorMode" \${m.error_mode?'checked':''}><span>\${m.error_mode?'开启':'关闭'}</span></div></div>
     <div class="form-row"><label>错误码</label><input type="number" id="editErrCode" value="\${m.error?.code||500}"></div>
     <div class="form-row"><label>错误消息</label><input type="text" id="editErrMsg" value="\${esc(m.error?.message||'')}"></div>
+    <div class="form-row"><label>finish_reason</label><input type="text" id="editFinishReason" value="\${esc(m.finish_reason||'')}" placeholder="stop / tool_calls / length"></div>
+    <div class="form-row"><label>tool_calls (JSON 数组，留空不输出)</label><textarea id="editToolCalls" style="min-height:80px" placeholder='[{"type":"function","function":{"name":"func_name","arguments":"{}"}}]'>\${esc(typeof m.tool_calls === 'string' ? m.tool_calls : JSON.stringify(m.tool_calls||[], null, 2))}</textarea></div>
+    <div class="form-row"><label>usage (JSON 对象，留空返回全零)</label><textarea id="editUsage" style="min-height:60px" placeholder='{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}'>\${esc(typeof m.usage === 'string' ? m.usage : JSON.stringify(m.usage||{}, null, 2))}</textarea></div>
     <div class="form-row"><label>metadata (JSON)</label><textarea id="editMeta" style="min-height:60px">\${esc(JSON.stringify(m.metadata||{}, null, 2))}</textarea></div>
     <div class="btn-row">
       <button class="btn btn-primary btn-sm" onclick="saveModel('\${esc(id)}')">保存</button>
@@ -799,7 +802,10 @@ async function saveModel(id) {
       code: parseInt(document.getElementById('editErrCode').value),
       message: document.getElementById('editErrMsg').value
     },
-    metadata: JSON.parse(document.getElementById('editMeta').value || '{}')
+    metadata: JSON.parse(document.getElementById('editMeta').value || '{}'),
+    finish_reason: document.getElementById('editFinishReason').value,
+    tool_calls: document.getElementById('editToolCalls').value,
+    usage: document.getElementById('editUsage').value
   };
   await api('PUT', '/api/models/' + id, body);
   toast('模型已保存');
