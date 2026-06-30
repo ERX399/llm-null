@@ -60,6 +60,15 @@ function makeError(code, message) {
 function makeChatCompletion(modelId, content, modelCfg) {
   const message = { role: 'assistant', content };
   const finishReason = modelCfg.finish_reason || (modelCfg.tool_calls ? 'tool_calls' : 'stop');
+
+  // reasoning_content / reasoning（DeepSeek 推理模型标准字段）
+  if (modelCfg.reasoning_content) {
+    message.reasoning_content = modelCfg.reasoning_content;
+  }
+  if (modelCfg.reasoning) {
+    message.reasoning = modelCfg.reasoning;
+  }
+
   if (modelCfg.tool_calls) {
     try {
       const tc = typeof modelCfg.tool_calls === 'string' ? JSON.parse(modelCfg.tool_calls) : modelCfg.tool_calls;
@@ -74,9 +83,30 @@ function makeChatCompletion(modelId, content, modelCfg) {
       }
     } catch {}
   }
+
+  // 构建标准 usage 对象（含 prompt_tokens_details 和 completion_tokens_details）
+  const reasoningTokens = modelCfg.reasoning_tokens || 0;
   const usage = modelCfg.usage
     ? (typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage)
     : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  // 补全 prompt_tokens_details 和 completion_tokens_details
+  if (!usage.prompt_tokens_details) {
+    usage.prompt_tokens_details = {
+      audio_tokens: 0,
+      cached_tokens: 0,
+      image_tokens: 0,
+      video_tokens: 0
+    };
+  }
+  if (!usage.completion_tokens_details) {
+    usage.completion_tokens_details = {
+      audio_tokens: 0,
+      reasoning_tokens: reasoningTokens,
+      accepted_prediction_tokens: 0,
+      rejected_prediction_tokens: 0
+    };
+  }
+
   return {
     id: genId(),
     object: 'chat.completion',
@@ -136,15 +166,44 @@ function streamResponse(modelId, content, model, body) {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
   }
 
+  // 构建标准 usage（含 prompt_tokens_details 和 completion_tokens_details）
+  function buildUsage() {
+    const reasoningTokens = model.reasoning_tokens || 0;
+    let usage;
+    if (model.usage) {
+      try { usage = typeof model.usage === 'string' ? JSON.parse(model.usage) : model.usage; } catch { usage = {}; }
+    } else {
+      usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    }
+    if (!usage.prompt_tokens_details) {
+      usage.prompt_tokens_details = { audio_tokens: 0, cached_tokens: 0, image_tokens: 0, video_tokens: 0 };
+    }
+    if (!usage.completion_tokens_details) {
+      usage.completion_tokens_details = { audio_tokens: 0, reasoning_tokens: reasoningTokens, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0 };
+    }
+    return usage;
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
+      // 先输出 reasoning_content（如果有）
+      if (model.reasoning_content) {
+        const rc = model.reasoning_content;
+        const rcChunkSize = model.stream_chunk_size > 0 ? model.stream_chunk_size : rc.length;
+        for (let i = 0; i < rc.length; i += rcChunkSize) {
+          controller.enqueue(sendChunk({ reasoning_content: rc.slice(i, i + rcChunkSize) }));
+        }
+      }
+      // 再输出正文 content
       for (let i = 0; i < content.length; i += chunkSize) {
         controller.enqueue(sendChunk({ content: content.slice(i, i + chunkSize) }));
       }
       const finishReason = model.finish_reason || (model.tool_calls ? 'tool_calls' : 'stop');
+      const usage = buildUsage();
       const done = {
         id, object: 'chat.completion.chunk', created, model: modelId,
-        choices: [{ index: 0, delta: {}, finish_reason: finishReason }]
+        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+        usage
       };
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(done)}\n\n`));
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
@@ -385,6 +444,9 @@ async function handleAdmin(method, pathname, request, config, env) {
       stream_chunk_size: body.stream_chunk_size || 0,
       metadata: body.metadata || {},
       finish_reason: body.finish_reason || '',
+      reasoning_content: body.reasoning_content || '',
+      reasoning: body.reasoning || '',
+      reasoning_tokens: body.reasoning_tokens || 0,
       tool_calls: body.tool_calls || '',
       usage: body.usage || ''
     };
