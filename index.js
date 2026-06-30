@@ -234,6 +234,13 @@ function makeClaudeError(code, message) {
 function makeClaudeMessage(modelId, modelCfg) {
   const content = [];
   let stopReason = 'end_turn';
+
+  // Claude thinking/reasoning block
+  if (modelCfg.reasoning || modelCfg.reasoning_content) {
+    const thinkingText = modelCfg.reasoning || modelCfg.reasoning_content;
+    content.push({ type: 'thinking', thinking: thinkingText, signature: '' });
+  }
+
   if (modelCfg.tool_calls) {
     try {
       const tc = typeof modelCfg.tool_calls === 'string' ? JSON.parse(modelCfg.tool_calls) : modelCfg.tool_calls;
@@ -297,14 +304,28 @@ function streamClaudeResponse(modelId, model) {
   const stream = new ReadableStream({
     async start(ctrl) {
       ctrl.enqueue(ev('message_start', { type: 'message_start', message: { id: msgId, type: 'message', role: 'assistant', content: [], model: modelId, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } }));
-      ctrl.enqueue(ev('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }));
+      
+      // thinking/reasoning block
+      if (model.reasoning || model.reasoning_content) {
+        const thinkingText = model.reasoning || model.reasoning_content || '';
+        ctrl.enqueue(ev('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } }));
+        if (chunkSize > 0) {
+          for (let i = 0; i < thinkingText.length; i += chunkSize) ctrl.enqueue(ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkingText.slice(i, i + chunkSize) } }));
+        } else {
+          ctrl.enqueue(ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkingText } }));
+        }
+        ctrl.enqueue(ev('content_block_stop', { type: 'content_block_stop', index: 0 }));
+      }
+      
+      // text block
+      ctrl.enqueue(ev('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } }));
       const c = model.response;
       if (chunkSize > 0) {
-        for (let i = 0; i < c.length; i += chunkSize) ctrl.enqueue(ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: c.slice(i, i + chunkSize) } }));
+        for (let i = 0; i < c.length; i += chunkSize) ctrl.enqueue(ev('content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: c.slice(i, i + chunkSize) } }));
       } else {
-        ctrl.enqueue(ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: c } }));
+        ctrl.enqueue(ev('content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: c } }));
       }
-      ctrl.enqueue(ev('content_block_stop', { type: 'content_block_stop', index: 0 }));
+      ctrl.enqueue(ev('content_block_stop', { type: 'content_block_stop', index: 1 }));
       const claudeStreamStopReason = model.finish_reason || (model.tool_calls ? 'tool_use' : 'end_turn');
       ctrl.enqueue(ev('message_delta', { type: 'message_delta', delta: { stop_reason: claudeStreamStopReason, stop_sequence: null }, usage: { output_tokens: 0 } }));
       ctrl.enqueue(ev('message_stop', { type: 'message_stop' }));
