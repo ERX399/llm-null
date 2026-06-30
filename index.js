@@ -14,7 +14,7 @@ function json(data, status = 200, config = null) {
     headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
     headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization';
   }
-  return new Response(JSON.stringify(data, null, 2), { status, headers });
+  return new Response(JSON.stringify(data), { status, headers });
 }
 
 function genId() {
@@ -89,7 +89,6 @@ function makeChatCompletion(modelId, content, modelCfg) {
   const usage = modelCfg.usage
     ? (typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage)
     : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-  // 补全 prompt_tokens_details 和 completion_tokens_details
   if (!usage.prompt_tokens_details) {
     usage.prompt_tokens_details = {
       audio_tokens: 0,
@@ -99,12 +98,9 @@ function makeChatCompletion(modelId, content, modelCfg) {
     };
   }
   if (!usage.completion_tokens_details) {
-    usage.completion_tokens_details = {
-      audio_tokens: 0,
-      reasoning_tokens: reasoningTokens,
-      accepted_prediction_tokens: 0,
-      rejected_prediction_tokens: 0
-    };
+    usage.completion_tokens_details = reasoningTokens > 0
+      ? { audio_tokens: 0, reasoning_tokens: reasoningTokens, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0 }
+      : null;
   }
 
   return {
@@ -179,7 +175,9 @@ function streamResponse(modelId, content, model, body) {
       usage.prompt_tokens_details = { audio_tokens: 0, cached_tokens: 0, image_tokens: 0, video_tokens: 0 };
     }
     if (!usage.completion_tokens_details) {
-      usage.completion_tokens_details = { audio_tokens: 0, reasoning_tokens: reasoningTokens, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0 };
+      usage.completion_tokens_details = reasoningTokens > 0
+        ? { audio_tokens: 0, reasoning_tokens: reasoningTokens, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0 }
+        : null;
     }
     return usage;
   }
@@ -358,7 +356,7 @@ function makeResponsesResult(modelId, modelCfg) {
     usage.input_tokens_details = { cached_tokens: 0 };
   }
   if (!usage.output_tokens_details) {
-    usage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+    usage.output_tokens_details = reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : null;
   }
   
   return {
@@ -409,7 +407,7 @@ function streamResponses(modelId, model) {
       usage.input_tokens_details = { cached_tokens: 0 };
     }
     if (!usage.output_tokens_details) {
-      usage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+      usage.output_tokens_details = reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : null;
     }
     return usage;
   }
