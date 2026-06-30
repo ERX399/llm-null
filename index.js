@@ -25,6 +25,44 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+// 粗略 token 估算
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length / 3);
+}
+
+// 统一构建 usage 对象，自动计算缺失值
+function buildUsage(modelCfg, promptText) {
+  const reasoningTokens = modelCfg.reasoning_tokens || 0;
+  if (modelCfg.usage) {
+    try {
+      const u = typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage;
+      if ((u.completion_tokens || 0) < reasoningTokens) u.completion_tokens = reasoningTokens;
+      if (!u.total_tokens) u.total_tokens = (u.prompt_tokens || 0) + (u.completion_tokens || 0);
+      if (!u.prompt_tokens_details) {
+        u.prompt_tokens_details = { audio_tokens: 0, cached_tokens: 0, image_tokens: 0, video_tokens: 0 };
+      }
+      if (!u.completion_tokens_details) {
+        u.completion_tokens_details = reasoningTokens > 0
+          ? { audio_tokens: 0, reasoning_tokens: reasoningTokens, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0 }
+          : null;
+      }
+      return u;
+    } catch {}
+  }
+  const promptTokens = promptText ? estimateTokens(promptText) : 1;
+  const contentTokens = estimateTokens(modelCfg.response) + reasoningTokens;
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: contentTokens,
+    total_tokens: promptTokens + contentTokens,
+    prompt_tokens_details: { audio_tokens: 0, cached_tokens: 0, image_tokens: 0, video_tokens: 0 },
+    completion_tokens_details: reasoningTokens > 0
+      ? { audio_tokens: 0, reasoning_tokens: reasoningTokens, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0 }
+      : null
+  };
+}
+
 function resolveModel(config, modelId) {
   if (!modelId) modelId = config.default_model_id;
   return config.models?.[modelId] || null;
@@ -57,16 +95,13 @@ function makeError(code, message) {
 //  OpenAI Chat Completions
 // ============================================================
 
-function makeChatCompletion(modelId, content, modelCfg) {
+function makeChatCompletion(modelId, content, modelCfg, promptText) {
   const message = { role: 'assistant', content };
   const finishReason = modelCfg.finish_reason || (modelCfg.tool_calls ? 'tool_calls' : 'stop');
 
-  // reasoning_content / reasoning（DeepSeek 推理模型标准字段）
+  // 优先使用 reasoning_content（DeepSeek 标准），reasoning 作为别名仅在内为空时填充
   if (modelCfg.reasoning_content) {
     message.reasoning_content = modelCfg.reasoning_content;
-  }
-  if (modelCfg.reasoning) {
-    message.reasoning = modelCfg.reasoning;
   }
 
   if (modelCfg.tool_calls) {
@@ -84,24 +119,7 @@ function makeChatCompletion(modelId, content, modelCfg) {
     } catch {}
   }
 
-  // 构建标准 usage 对象（含 prompt_tokens_details 和 completion_tokens_details）
-  const reasoningTokens = modelCfg.reasoning_tokens || 0;
-  const usage = modelCfg.usage
-    ? (typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage)
-    : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-  if (!usage.prompt_tokens_details) {
-    usage.prompt_tokens_details = {
-      audio_tokens: 0,
-      cached_tokens: 0,
-      image_tokens: 0,
-      video_tokens: 0
-    };
-  }
-  if (!usage.completion_tokens_details) {
-    usage.completion_tokens_details = reasoningTokens > 0
-      ? { audio_tokens: 0, reasoning_tokens: reasoningTokens, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0 }
-      : null;
-  }
+  const usage = buildUsage(modelCfg, promptText || content);
 
   return {
     id: genId(),
@@ -141,14 +159,16 @@ async function handleChatCompletions(request, config) {
     const delay = (model.delay_ms || 0) + (config.global_delay_ms || 0);
     if (delay > 0) await sleep(delay);
     const content = model.response;
-    if (body.stream) return streamResponse(modelId, content, model, body);
-    return json(makeChatCompletion(modelId, content, model), 200, config);
+    // 提取 prompt 文本用于 token 估算
+    const promptText = Array.isArray(body.messages) ? body.messages.map(m => typeof m.content === 'string' ? m.content : '').join(' ') : '';
+    if (body.stream) return streamResponse(modelId, content, model, body, promptText);
+    return json(makeChatCompletion(modelId, content, model, promptText), 200, config);
   } catch (e) {
     return json(makeError(500, 'Internal error: ' + (e.message || String(e))), 500, config);
   }
 }
 
-function streamResponse(modelId, content, model, body) {
+function streamResponse(modelId, content, model, body, promptText) {
   const id = genId();
   const created = Math.floor(Date.now() / 1000);
   const chunkSize = model.stream_chunk_size > 0 ? model.stream_chunk_size : content.length;
@@ -162,24 +182,9 @@ function streamResponse(modelId, content, model, body) {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
   }
 
-  // 构建标准 usage（含 prompt_tokens_details 和 completion_tokens_details）
-  function buildUsage() {
-    const reasoningTokens = model.reasoning_tokens || 0;
-    let usage;
-    if (model.usage) {
-      try { usage = typeof model.usage === 'string' ? JSON.parse(model.usage) : model.usage; } catch { usage = {}; }
-    } else {
-      usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    }
-    if (!usage.prompt_tokens_details) {
-      usage.prompt_tokens_details = { audio_tokens: 0, cached_tokens: 0, image_tokens: 0, video_tokens: 0 };
-    }
-    if (!usage.completion_tokens_details) {
-      usage.completion_tokens_details = reasoningTokens > 0
-        ? { audio_tokens: 0, reasoning_tokens: reasoningTokens, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0 }
-        : null;
-    }
-    return usage;
+  // 构建 usage（统一使用 buildUsage）
+  function buildStreamUsage() {
+    return buildUsage(model, promptText || content);
   }
 
   const stream = new ReadableStream({
@@ -197,7 +202,7 @@ function streamResponse(modelId, content, model, body) {
         controller.enqueue(sendChunk({ content: content.slice(i, i + chunkSize) }));
       }
       const finishReason = model.finish_reason || (model.tool_calls ? 'tool_calls' : 'stop');
-      const usage = buildUsage();
+      const usage = buildStreamUsage();
       const done = {
         id, object: 'chat.completion.chunk', created, model: modelId,
         choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
@@ -253,10 +258,11 @@ function makeClaudeMessage(modelId, modelCfg) {
     } catch {}
   }
   content.push({ type: 'text', text: modelCfg.response });
-  let usage = { input_tokens: 0, output_tokens: 0 };
-  if (modelCfg.usage) {
-    try { const u = typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage; usage = { input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0 }; } catch {}
-  }
+  const oaiUsage = buildUsage(modelCfg, modelCfg.response);
+  const usage = {
+    input_tokens: oaiUsage.prompt_tokens,
+    output_tokens: oaiUsage.completion_tokens
+  };
   return {
     id: 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24),
     type: 'message', role: 'assistant', model: modelId, content,
@@ -303,7 +309,8 @@ function streamClaudeResponse(modelId, model) {
 
   const stream = new ReadableStream({
     async start(ctrl) {
-      ctrl.enqueue(ev('message_start', { type: 'message_start', message: { id: msgId, type: 'message', role: 'assistant', content: [], model: modelId, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } }));
+      const claudeUsage = buildUsage(model, model.response);
+      ctrl.enqueue(ev('message_start', { type: 'message_start', message: { id: msgId, type: 'message', role: 'assistant', content: [], model: modelId, stop_reason: null, stop_sequence: null, usage: { input_tokens: claudeUsage.prompt_tokens, output_tokens: 0 } } }));
       
       // thinking/reasoning block
       if (model.reasoning || model.reasoning_content) {
@@ -327,7 +334,7 @@ function streamClaudeResponse(modelId, model) {
       }
       ctrl.enqueue(ev('content_block_stop', { type: 'content_block_stop', index: 1 }));
       const claudeStreamStopReason = model.finish_reason || (model.tool_calls ? 'tool_use' : 'end_turn');
-      ctrl.enqueue(ev('message_delta', { type: 'message_delta', delta: { stop_reason: claudeStreamStopReason, stop_sequence: null }, usage: { output_tokens: 0 } }));
+      ctrl.enqueue(ev('message_delta', { type: 'message_delta', delta: { stop_reason: claudeStreamStopReason, stop_sequence: null }, usage: { output_tokens: claudeUsage.completion_tokens } }));
       ctrl.enqueue(ev('message_stop', { type: 'message_stop' }));
       ctrl.close();
     }
@@ -366,19 +373,17 @@ function makeResponsesResult(modelId, modelCfg) {
   }
   out.push({ type: 'message', role: 'assistant', id: 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12),
     content: [{ type: 'output_text', text: modelCfg.response || '', annotations: [] }] });
-  
-  // 构建标准 usage（含 input_tokens_details 和 output_tokens_details）
+
+  // 使用统一的 buildUsage 构建 usage，再转换为 Responses API 格式
+  const oaiUsage = buildUsage(modelCfg, modelCfg.response);
   const reasoningTokens = modelCfg.reasoning_tokens || 0;
-  let usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
-  if (modelCfg.usage) {
-    try { usage = typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage; } catch {}
-  }
-  if (!usage.input_tokens_details) {
-    usage.input_tokens_details = { cached_tokens: 0 };
-  }
-  if (!usage.output_tokens_details) {
-    usage.output_tokens_details = reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : null;
-  }
+  const usage = {
+    input_tokens: oaiUsage.prompt_tokens,
+    output_tokens: oaiUsage.completion_tokens,
+    total_tokens: oaiUsage.total_tokens,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens_details: reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : null
+  };
   
   return {
     id: 'resp_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24),
@@ -417,20 +422,17 @@ function streamResponses(modelId, model) {
     return enc.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
-  // 构建标准 usage
-  function buildUsage() {
+  // 构建 Responses API 流式 usage
+  function buildResponsesStreamUsage() {
+    const oaiUsage = buildUsage(model, model.response || '');
     const reasoningTokens = model.reasoning_tokens || 0;
-    let usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
-    if (model.usage) {
-      try { usage = typeof model.usage === 'string' ? JSON.parse(model.usage) : model.usage; } catch {}
-    }
-    if (!usage.input_tokens_details) {
-      usage.input_tokens_details = { cached_tokens: 0 };
-    }
-    if (!usage.output_tokens_details) {
-      usage.output_tokens_details = reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : null;
-    }
-    return usage;
+    return {
+      input_tokens: oaiUsage.prompt_tokens,
+      output_tokens: oaiUsage.completion_tokens,
+      total_tokens: oaiUsage.total_tokens,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens_details: reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : null
+    };
   }
 
   const stream = new ReadableStream({
@@ -453,7 +455,7 @@ function streamResponses(modelId, model) {
       }
       ctrl.enqueue(ev('response.output_text.done', { type: 'response.output_text.done', text: c }));
       
-      const usage = buildUsage();
+      const usage = buildResponsesStreamUsage();
       const finalOutput = [];
       if (rcText) {
         finalOutput.push({ type: 'reasoning', id: 'rs_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24), summary: [{ type: 'summary_text', text: rcText }] });
