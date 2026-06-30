@@ -1,5 +1,5 @@
 name = "llm-null"
-main = "src/index.js"
+main = "index.js"
 compatibility_date = "2024-12-01"
 
 # 默认不绑定 KV，开箱即用，无需任何外部部件
