@@ -55,7 +55,7 @@ function parseBlock(lines, start, indent) {
 
     if (val === '|' || val === '>' || val === '|-' || val === '>-') {
       // 多行文本块开始
-      pendingMultiline = { key: k, mode: val[0], lines: [] };
+      pendingMultiline = { key: k, mode: val, lines: [] };
       i++;
       continue;
     }
@@ -219,9 +219,11 @@ function joinMultiline(lines, mode) {
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
     lines.pop();
   }
-  if (mode === '|') {
-    return lines.join('\n') + '\n';
-  } else if (mode === '>') {
+  // |- 和 >- 不保留尾部换行
+  const stripTrailing = mode.endsWith('-');
+  if (mode === '|' || mode === '|-') {
+    return lines.join('\n') + (stripTrailing ? '' : '\n');
+  } else if (mode === '>' || mode === '>-') {
     // 折叠：连续非空行合并为空格
     let result = '';
     let prevEmpty = false;
@@ -235,9 +237,7 @@ function joinMultiline(lines, mode) {
         prevEmpty = false;
       }
     }
-    return result + '\n';
+    return result + (stripTrailing ? '' : '\n');
   }
-  // |- / >- 不保留尾部换行
-  if (mode === '|') return lines.join('\n');
   return lines.join('\n');
 }
