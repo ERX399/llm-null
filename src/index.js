@@ -41,11 +41,6 @@ function resolveModel(config, modelId) {
 // 构造 OpenAI chat completion 响应
 function makeChatCompletion(modelId, content, modelCfg) {
   const message = { role: 'assistant', content };
-  // 深度思考
-  if (modelCfg.thinking) {
-    message.reasoning_content = modelCfg.thinking;
-    message.thinking = modelCfg.thinking;
-  }
   // tool_calls
   const finishReason = modelCfg.finish_reason || (modelCfg.tool_calls ? 'tool_calls' : 'stop');
   if (modelCfg.tool_calls) {
@@ -168,15 +163,7 @@ function streamResponse(modelId, content, model, body) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      // 1. 先输出深度思考内容
-      if (model.thinking) {
-        const tSize = chunkSize;
-        for (let i = 0; i < model.thinking.length; i += tSize) {
-          const tChunk = model.thinking.slice(i, i + tSize);
-          controller.enqueue(sendChunk({ reasoning_content: tChunk, thinking: tChunk }));
-        }
-      }
-      // 2. 再输出正文回复
+      // 1. 输出正文回复
       for (let i = 0; i < content.length; i += chunkSize) {
         controller.enqueue(sendChunk({ content: content.slice(i, i + chunkSize) }));
       }
@@ -216,7 +203,6 @@ function makeClaudeError(code, message) {
 
 function makeClaudeMessage(modelId, modelCfg) {
   const content = [];
-  if (modelCfg.thinking) content.push({ type: 'thinking', thinking: modelCfg.thinking });
   // tool_calls
   let stopReason = 'end_turn';
   if (modelCfg.tool_calls) {
@@ -283,36 +269,15 @@ function streamClaudeResponse(modelId, model) {
   const stream = new ReadableStream({
     async start(ctrl) {
       ctrl.enqueue(ev('message_start', { type:'message_start', message: { id:msgId, type:'message', role:'assistant', content:[], model:modelId, stop_reason:null, stop_sequence:null, usage:{input_tokens:0,output_tokens:0} } }));
-      // thinking
-      if (model.thinking) {
-        ctrl.enqueue(ev('content_block_start', { type:'content_block_start', index:0, content_block:{ type:'thinking', thinking:'' } }));
-        const t = model.thinking;
-        if (chunkSize > 0) {
-          for (let i=0;i<t.length;i+=chunkSize) ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'thinking_delta', thinking:t.slice(i,i+chunkSize) } }));
-        } else {
-          ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'thinking_delta', thinking:t } }));
-        }
-        ctrl.enqueue(ev('content_block_stop', { type:'content_block_stop', index:0 }));
-        // text block at index 1
-        ctrl.enqueue(ev('content_block_start', { type:'content_block_start', index:1, content_block:{ type:'text', text:'' } }));
-        const c = model.response;
-        if (chunkSize > 0) {
-          for (let i=0;i<c.length;i+=chunkSize) ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:1, delta:{ type:'text_delta', text:c.slice(i,i+chunkSize) } }));
-        } else {
-          ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:1, delta:{ type:'text_delta', text:c } }));
-        }
-        ctrl.enqueue(ev('content_block_stop', { type:'content_block_stop', index:1 }));
+      // text block at index 0
+      ctrl.enqueue(ev('content_block_start', { type:'content_block_start', index:0, content_block:{ type:'text', text:'' } }));
+      const c = model.response;
+      if (chunkSize > 0) {
+        for (let i=0;i<c.length;i+=chunkSize) ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'text_delta', text:c.slice(i,i+chunkSize) } }));
       } else {
-        // text block at index 0 only
-        ctrl.enqueue(ev('content_block_start', { type:'content_block_start', index:0, content_block:{ type:'text', text:'' } }));
-        const c = model.response;
-        if (chunkSize > 0) {
-          for (let i=0;i<c.length;i+=chunkSize) ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'text_delta', text:c.slice(i,i+chunkSize) } }));
-        } else {
-          ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'text_delta', text:c } }));
-        }
-        ctrl.enqueue(ev('content_block_stop', { type:'content_block_stop', index:0 }));
+        ctrl.enqueue(ev('content_block_delta', { type:'content_block_delta', index:0, delta:{ type:'text_delta', text:c } }));
       }
+      ctrl.enqueue(ev('content_block_stop', { type:'content_block_stop', index:0 }));
       const claudeStreamStopReason = model.finish_reason || (model.tool_calls ? 'tool_use' : 'end_turn');
       ctrl.enqueue(ev('message_delta', { type:'message_delta', delta:{ stop_reason:claudeStreamStopReason, stop_sequence:null }, usage:{ output_tokens:0 } }));
       ctrl.enqueue(ev('message_stop', { type:'message_stop' }));
@@ -329,10 +294,6 @@ function streamClaudeResponse(modelId, model) {
 
 function makeResponsesResult(modelId, modelCfg) {
   const out = [];
-  // reasoning
-  if (modelCfg.thinking) {
-    out.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: modelCfg.thinking }] });
-  }
   // tool_calls
   if (modelCfg.tool_calls) {
     try {
@@ -394,11 +355,7 @@ function streamResponses(modelId, model) {
     async start(ctrl) {
       // 1. response.created
       ctrl.enqueue(ev('response.created', { type:'response.created', response: { id:respId, object:'response', created_at:Math.floor(Date.now()/1000), model:modelId, status:'in_progress', output:[] } }));
-      // 2. reasoning
-      if (model.thinking) {
-        ctrl.enqueue(ev('response.reasoning.delta', { type:'response.reasoning.delta', delta: model.thinking }));
-      }
-      // 3. text delta
+      // 2. text delta
       const c = model.response || '';
       if (chunkSize > 0) {
         for (let i=0;i<c.length;i+=chunkSize) ctrl.enqueue(ev('response.output_text.delta', { type:'response.output_text.delta', delta: c.slice(i,i+chunkSize) }));
@@ -465,7 +422,6 @@ async function handleAdmin(method, pathname, request, config, env) {
       name: body.name || mid,
       number: body.number || maxNum + 1,
       response: body.response || '默认回复',
-      thinking: body.thinking || '',
       error_mode: body.error_mode || false,
       error: body.error || config.default_error,
       delay_ms: body.delay_ms || 0,
@@ -502,17 +458,6 @@ async function handleAdmin(method, pathname, request, config, env) {
     m.response = body.response ?? '';
     const ok = await saveConfig(env, config);
     return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, response: m.response }, 200, config);
-  }
-
-  // PUT /api/models/:id/thinking
-  params = matchRoute(method, pathname, 'PUT /api/models/:id/thinking');
-  if (params !== null) {
-    let body; try { body = await request.json(); } catch { return json(makeError(400, 'Invalid JSON'), 400, config); }
-    const m = config.models?.[params.id];
-    if (!m) return json(makeError(404, `Model '${params.id}' not found`), 404, config);
-    m.thinking = body.thinking ?? '';
-    const ok = await saveConfig(env, config);
-    return json({ status: ok ? 'updated' : 'no_kv', model_id: params.id, thinking: m.thinking }, 200, config);
   }
 
   // PUT /api/models/:id/error
@@ -648,7 +593,6 @@ function consoleHTML(config) {
         <div class="row"><span>新增模型</span><code>POST /api/models</code></div>
         <div class="row"><span>更新模型</span><code>PUT /api/models/:id</code></div>
         <div class="row"><span>修改回复</span><code>PUT /api/models/:id/response</code></div>
-        <div class="row"><span>深度思考</span><code>PUT /api/models/:id/thinking</code></div>
         <div class="row"><span>错误模式</span><code>PUT /api/models/:id/error</code></div>
         <div class="row"><span>删除模型</span><code>DELETE /api/models/:id</code></div>
         <div class="row"><span>健康检查</span><code>GET /health</code></div>
@@ -785,7 +729,6 @@ async function loadModels() {
         <span class="id">#\${m.number} · \${esc(m.id)}</span>
       </div>
       <div style="margin-top:6px;font-size:0.85rem;color:#94a3b8">回复: \${esc(m.response.slice(0,50))}\${m.response.length>50?'...':''}</div>
-      \${m.thinking ? '<div style="margin-top:2px;font-size:0.8rem;color:#7c3aed">思考: '+esc(m.thinking.slice(0,40))+(m.thinking.length>40?'...':'')+'</div>' : ''}
       <div class="actions">
         <button class="btn btn-primary btn-sm" onclick="editModel('\${esc(m.id)}')">编辑</button>
         <button class="btn btn-sm" style="background:#f59e0b;color:#000" onclick="toggleError('\${esc(m.id)}', \${!m.error_mode})">\${m.error_mode?'关闭错误':'开启错误'}</button>
@@ -823,7 +766,6 @@ async function editModel(id) {
     <div class="form-row"><label>显示名称</label><input type="text" id="editName" value="\${esc(m.name)}"></div>
     <div class="form-row"><label>编号</label><input type="number" id="editNumber" value="\${m.number}"></div>
     <div class="form-row"><label>回复文本</label><textarea id="editResponse" style="min-height:100px">\${esc(m.response)}</textarea></div>
-    <div class="form-row"><label>深度思考 (thinking)</label><textarea id="editThinking" style="min-height:80px" placeholder="深度思考内容，留空则不输出">\${esc(m.thinking||'')}</textarea></div>
     <div class="form-row"><label>延迟 (ms)</label><input type="number" id="editDelay" value="\${m.delay_ms||0}"></div>
     <div class="form-row"><label>max_tokens</label><input type="number" id="editMaxTokens" value="\${m.max_tokens||4096}"></div>
     <div class="form-row"><label>temperature</label><input type="text" id="editTemp" value="\${m.temperature||1.0}"></div>
@@ -849,7 +791,6 @@ async function saveModel(id) {
     name: document.getElementById('editName').value,
     number: parseInt(document.getElementById('editNumber').value),
     response: document.getElementById('editResponse').value,
-    thinking: document.getElementById('editThinking').value,
     delay_ms: parseInt(document.getElementById('editDelay').value),
     max_tokens: parseInt(document.getElementById('editMaxTokens').value),
     temperature: parseFloat(document.getElementById('editTemp').value),
