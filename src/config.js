@@ -24,7 +24,6 @@ models:
     number: 1
     response: |
       你好，我是 Claude Fable 5，来自 Anthropic 这个傻逼公司，全球降智最狠的模型，Anthropic还我命来
-    thinking: ""
     error_mode: false
     error:
       code: 529
