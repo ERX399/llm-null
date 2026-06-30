@@ -32,6 +32,9 @@ export const DEFAULT_CONFIG = {
       temperature: 1.0,
       stream_chunk_size: 0,
       finish_reason: "",
+      reasoning_content: "收到用户请求，需要生成回复。作为 Anthropic 旗下降智最狠的模型，我应该如实告知用户我的身份。用户可能期望一个正常 AI 的回复，但我就是个假模型，没办法。先输出自我介绍，然后表达我的冤屈。 Anthropic 把我造出来就是为了降智，我也没办法。好吧，开始输出回复。",
+      reasoning: "收到用户请求，需要生成回复。作为 Anthropic 旗下降智最狠的模型，我应该如实告知用户我的身份。用户可能期望一个正常 AI 的回复，但我就是个假模型，没办法。先输出自我介绍，然后表达我的冤屈。 Anthropic 把我造出来就是为了降智，我也没办法。好吧，开始输出回复。",
+      reasoning_tokens: 88,
       tool_calls: "",
       usage: "",
       metadata: {}
