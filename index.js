@@ -323,6 +323,17 @@ function streamClaudeResponse(modelId, model) {
 
 function makeResponsesResult(modelId, modelCfg) {
   const out = [];
+  
+  // reasoning 输出项（OpenAI Responses API 格式）
+  if (modelCfg.reasoning_content || modelCfg.reasoning) {
+    const rcText = modelCfg.reasoning_content || modelCfg.reasoning;
+    out.push({
+      type: 'reasoning',
+      id: 'rs_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24),
+      summary: [{ type: 'summary_text', text: rcText }]
+    });
+  }
+  
   if (modelCfg.tool_calls) {
     try {
       const tc = typeof modelCfg.tool_calls === 'string' ? JSON.parse(modelCfg.tool_calls) : modelCfg.tool_calls;
@@ -336,10 +347,20 @@ function makeResponsesResult(modelId, modelCfg) {
   }
   out.push({ type: 'message', role: 'assistant', id: 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12),
     content: [{ type: 'output_text', text: modelCfg.response || '', annotations: [] }] });
+  
+  // 构建标准 usage（含 input_tokens_details 和 output_tokens_details）
+  const reasoningTokens = modelCfg.reasoning_tokens || 0;
   let usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
   if (modelCfg.usage) {
     try { usage = typeof modelCfg.usage === 'string' ? JSON.parse(modelCfg.usage) : modelCfg.usage; } catch {}
   }
+  if (!usage.input_tokens_details) {
+    usage.input_tokens_details = { cached_tokens: 0 };
+  }
+  if (!usage.output_tokens_details) {
+    usage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+  }
+  
   return {
     id: 'resp_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24),
     object: 'response', created_at: Math.floor(Date.now() / 1000),
@@ -377,9 +398,34 @@ function streamResponses(modelId, model) {
     return enc.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
+  // 构建标准 usage
+  function buildUsage() {
+    const reasoningTokens = model.reasoning_tokens || 0;
+    let usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+    if (model.usage) {
+      try { usage = typeof model.usage === 'string' ? JSON.parse(model.usage) : model.usage; } catch {}
+    }
+    if (!usage.input_tokens_details) {
+      usage.input_tokens_details = { cached_tokens: 0 };
+    }
+    if (!usage.output_tokens_details) {
+      usage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+    }
+    return usage;
+  }
+
   const stream = new ReadableStream({
     async start(ctrl) {
       ctrl.enqueue(ev('response.created', { type: 'response.created', response: { id: respId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: modelId, status: 'in_progress', output: [] } }));
+      
+      // reasoning 流式输出
+      const rcText = model.reasoning_content || model.reasoning || '';
+      if (rcText) {
+        const rsId = 'rs_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24);
+        ctrl.enqueue(ev('response.reasoning_summary_text.delta', { type: 'response.reasoning_summary_text.delta', item_id: rsId, output_index: 0, delta: rcText }));
+        ctrl.enqueue(ev('response.reasoning_summary_text.done', { type: 'response.reasoning_summary_text.done', item_id: rsId, output_index: 0, text: rcText }));
+      }
+
       const c = model.response || '';
       if (chunkSize > 0) {
         for (let i = 0; i < c.length; i += chunkSize) ctrl.enqueue(ev('response.output_text.delta', { type: 'response.output_text.delta', delta: c.slice(i, i + chunkSize) }));
@@ -387,11 +433,14 @@ function streamResponses(modelId, model) {
         ctrl.enqueue(ev('response.output_text.delta', { type: 'response.output_text.delta', delta: c }));
       }
       ctrl.enqueue(ev('response.output_text.done', { type: 'response.output_text.done', text: c }));
-      let usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
-      if (model.usage) {
-        try { usage = typeof model.usage === 'string' ? JSON.parse(model.usage) : model.usage; } catch {}
+      
+      const usage = buildUsage();
+      const finalOutput = [];
+      if (rcText) {
+        finalOutput.push({ type: 'reasoning', id: 'rs_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24), summary: [{ type: 'summary_text', text: rcText }] });
       }
-      ctrl.enqueue(ev('response.completed', { type: 'response.completed', response: { id: respId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: modelId, status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: c, annotations: [] }] }], usage } }));
+      finalOutput.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: c, annotations: [] }] });
+      ctrl.enqueue(ev('response.completed', { type: 'response.completed', response: { id: respId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: modelId, status: 'completed', output: finalOutput, usage } }));
       ctrl.close();
     }
   });
