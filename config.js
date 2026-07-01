@@ -40,7 +40,7 @@ export const DEFAULT_CONFIG = {
       metadata: {}
     }
   },
-models: {
+  models: {
     "claude-mythos-5": {
       id: "claude-mythos-5",
       name: "Claude Mythos 5",
