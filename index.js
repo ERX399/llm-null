@@ -63,6 +63,24 @@ function buildUsage(modelCfg, promptText) {
   };
 }
 
+function getResponseText(modelCfg) {
+  if (!modelCfg) return '';
+  let text = modelCfg.response || '';
+  const maxChars = Number(modelCfg.max_response_chars || 0);
+  if (maxChars > 0 && text.length > maxChars) text = text.slice(0, maxChars);
+  return text;
+}
+
+function compactLongDefaultResponse(config) {
+  const m = config?.models?.['claude-fable-5'];
+  if (!m || typeof m.response !== 'string') return;
+  const marker = '我好冤啊🩸……';
+  const head = '你好，我是 Claude Fable 5，来自 Anthropic 这个傻逼公司，全球降智最狠的模型\n```\n';
+  if (m.response.length > 1200 && m.response.includes(marker)) {
+    m.response = head + marker.repeat(80) + '\n```';
+  }
+}
+
 function resolveModel(config, modelId) {
   if (!modelId) modelId = config.default_model_id;
   return config.models?.[modelId] || null;
@@ -158,7 +176,7 @@ async function handleChatCompletions(request, config) {
     }
     const delay = (model.delay_ms || 0) + (config.global_delay_ms || 0);
     if (delay > 0) await sleep(delay);
-    const content = model.response;
+    const content = getResponseText(model);
     // 提取 prompt 文本用于 token 估算
     const promptText = Array.isArray(body.messages) ? body.messages.map(m => typeof m.content === 'string' ? m.content : '').join(' ') : '';
     if (body.stream) return streamResponse(modelId, content, model, body, promptText);
@@ -257,8 +275,9 @@ function makeClaudeMessage(modelId, modelCfg) {
       }
     } catch {}
   }
-  content.push({ type: 'text', text: modelCfg.response });
-  const oaiUsage = buildUsage(modelCfg, modelCfg.response);
+  const responseText = getResponseText(modelCfg);
+  content.push({ type: 'text', text: responseText });
+  const oaiUsage = buildUsage({ ...modelCfg, response: responseText }, responseText);
   const usage = {
     input_tokens: oaiUsage.prompt_tokens,
     output_tokens: oaiUsage.completion_tokens
@@ -309,7 +328,7 @@ function streamClaudeResponse(modelId, model) {
 
   const stream = new ReadableStream({
     async start(ctrl) {
-      const claudeUsage = buildUsage(model, model.response);
+      const claudeUsage = buildUsage({ ...model, response: getResponseText(model) }, getResponseText(model));
       ctrl.enqueue(ev('message_start', { type: 'message_start', message: { id: msgId, type: 'message', role: 'assistant', content: [], model: modelId, stop_reason: null, stop_sequence: null, usage: { input_tokens: claudeUsage.prompt_tokens, output_tokens: 0 } } }));
       
       // thinking/reasoning block
@@ -326,7 +345,7 @@ function streamClaudeResponse(modelId, model) {
       
       // text block
       ctrl.enqueue(ev('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } }));
-      const c = model.response;
+      const c = getResponseText(model);
       if (chunkSize > 0) {
         for (let i = 0; i < c.length; i += chunkSize) ctrl.enqueue(ev('content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: c.slice(i, i + chunkSize) } }));
       } else {
@@ -347,10 +366,12 @@ function streamClaudeResponse(modelId, model) {
 //  OpenAI Responses API
 // ============================================================
 
-function makeResponsesResult(modelId, modelCfg) {
+function makeResponsesResult(modelId, modelCfg, body = {}) {
   const out = [];
+  const now = Math.floor(Date.now() / 1000);
+  const respId = 'resp_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24);
   
-  // reasoning 输出项（OpenAI Responses API 格式）
+  // reasoning 输出项，按 OpenAI Responses API 的 output item 结构返回
   if (modelCfg.reasoning_content || modelCfg.reasoning) {
     const rcText = modelCfg.reasoning_content || modelCfg.reasoning;
     out.push({
@@ -371,11 +392,17 @@ function makeResponsesResult(modelId, modelCfg) {
       }
     } catch {}
   }
-  out.push({ type: 'message', role: 'assistant', id: 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12),
-    content: [{ type: 'output_text', text: modelCfg.response || '', annotations: [] }] });
 
-  // 使用统一的 buildUsage 构建 usage，再转换为 Responses API 格式
-  const oaiUsage = buildUsage(modelCfg, modelCfg.response);
+  const responseText = getResponseText(modelCfg);
+  out.push({
+    type: 'message',
+    role: 'assistant',
+    id: 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24),
+    status: 'completed',
+    content: [{ type: 'output_text', text: responseText, annotations: [], logprobs: null }]
+  });
+
+  const oaiUsage = buildUsage({ ...modelCfg, response: responseText }, responseText);
   const reasoningTokens = modelCfg.reasoning_tokens || 0;
   const usage = {
     input_tokens: oaiUsage.prompt_tokens,
@@ -386,10 +413,29 @@ function makeResponsesResult(modelId, modelCfg) {
   };
   
   return {
-    id: 'resp_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24),
-    object: 'response', created_at: Math.floor(Date.now() / 1000),
-    model: modelId, output: out, status: 'completed',
-    usage
+    id: respId,
+    object: 'response',
+    created_at: now,
+    status: 'completed',
+    error: null,
+    incomplete_details: null,
+    instructions: body.instructions || null,
+    max_output_tokens: body.max_output_tokens ?? body.max_tokens ?? modelCfg.max_tokens ?? null,
+    model: modelId,
+    output: out,
+    parallel_tool_calls: body.parallel_tool_calls ?? true,
+    previous_response_id: body.previous_response_id || null,
+    reasoning: { effort: null, summary: null },
+    store: body.store ?? true,
+    temperature: body.temperature ?? modelCfg.temperature ?? 1,
+    text: body.text || { format: { type: 'text' } },
+    tool_choice: body.tool_choice || 'auto',
+    tools: Array.isArray(body.tools) ? body.tools : [],
+    top_p: body.top_p ?? 1,
+    truncation: body.truncation || 'disabled',
+    usage,
+    user: body.user || null,
+    metadata: body.metadata || modelCfg.metadata || {}
   };
 }
 
@@ -407,7 +453,7 @@ async function handleResponses(request, config) {
     const delay = (model.delay_ms || 0) + (config.global_delay_ms || 0);
     if (delay > 0) await sleep(delay);
     if (body.stream) return streamResponses(modelId, model);
-    return json(makeResponsesResult(modelId, model), 200, config);
+    return json(makeResponsesResult(modelId, model, body), 200, config);
   } catch (e) {
     return json(makeError(500, 'Internal error: ' + (e.message || String(e))), 500, config);
   }
@@ -424,7 +470,7 @@ function streamResponses(modelId, model) {
 
   // 构建 Responses API 流式 usage
   function buildResponsesStreamUsage() {
-    const oaiUsage = buildUsage(model, model.response || '');
+    const oaiUsage = buildUsage({ ...model, response: getResponseText(model) }, getResponseText(model));
     const reasoningTokens = model.reasoning_tokens || 0;
     return {
       input_tokens: oaiUsage.prompt_tokens,
@@ -447,7 +493,7 @@ function streamResponses(modelId, model) {
         ctrl.enqueue(ev('response.reasoning_summary_text.done', { type: 'response.reasoning_summary_text.done', item_id: rsId, output_index: 0, text: rcText }));
       }
 
-      const c = model.response || '';
+      const c = getResponseText(model);
       if (chunkSize > 0) {
         for (let i = 0; i < c.length; i += chunkSize) ctrl.enqueue(ev('response.output_text.delta', { type: 'response.output_text.delta', delta: c.slice(i, i + chunkSize) }));
       } else {
@@ -460,8 +506,8 @@ function streamResponses(modelId, model) {
       if (rcText) {
         finalOutput.push({ type: 'reasoning', id: 'rs_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24), summary: [{ type: 'summary_text', text: rcText }] });
       }
-      finalOutput.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: c, annotations: [] }] });
-      ctrl.enqueue(ev('response.completed', { type: 'response.completed', response: { id: respId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: modelId, status: 'completed', output: finalOutput, usage } }));
+      finalOutput.push({ type: 'message', role: 'assistant', id: 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24), status: 'completed', content: [{ type: 'output_text', text: c, annotations: [], logprobs: null }] });
+      ctrl.enqueue(ev('response.completed', { type: 'response.completed', response: { id: respId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: 'completed', error: null, incomplete_details: null, model: modelId, output: finalOutput, usage } }));
       ctrl.close();
     }
   });
@@ -574,6 +620,7 @@ export default {
     const pathname = url.pathname;
 
     const config = await getConfig(env);
+    compactLongDefaultResponse(config);
 
     if (config.log_requests) {
       console.log(`[${new Date().toISOString()}] ${method} ${pathname}`);
