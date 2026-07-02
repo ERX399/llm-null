@@ -57,6 +57,23 @@ export const DEFAULT_CONFIG = {
       usage: "",
       metadata: {}
     }
+  },
+    "gpt-4o": {
+      id: "gpt-4o",
+      name: "gpt-4o",
+      number: 1,
+      response: "你好，我是 ChatGPT，来自 OPENAI",
+      error_mode: false,
+      delay_ms: 0,
+      max_tokens: 4096,
+      temperature: 1.0,
+      stream_chunk_size: 0,
+      finish_reason: "",
+      reasoning_tokens: 124948,
+      tool_calls: "",
+      usage: "",
+      metadata: {}
+    }
   }
 };
 
