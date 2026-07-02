@@ -56,8 +56,7 @@ export const DEFAULT_CONFIG = {
       tool_calls: "",
       usage: "",
       metadata: {}
-    }
-  },
+    },
     "gpt-4o": {
       id: "gpt-4o",
       name: "gpt-4o",
