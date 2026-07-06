@@ -57,11 +57,11 @@ export const DEFAULT_CONFIG = {
       usage: "",
       metadata: {}
     },
-    "gpt-4o": {
-      id: "gpt-4o",
-      name: "gpt-4o",
+    "gpt-3o": {
+      id: "gpt-3o",
+      name: "gpt-3o",
       number: 1,
-      response: "你好，我是 ChatGPT，来自 OPENAI",
+      response: "我是由 OpenAI 开发的 AI 助手\n\n我可以帮你解答问题、写代码、翻译、总结、创作内容等",
       error_mode: false,
       delay_ms: 0,
       max_tokens: 4096,
