@@ -17,6 +17,48 @@ function json(data, status = 200, config = null) {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
+function html(content, status = 200) {
+  return new Response(content, {
+    status,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' }
+  });
+}
+
+function homepage() {
+  return html(`<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>404 - 页面未找到</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+            background: linear-gradient(135deg, #18212f 0%, #243b55 45%, #0f2027 100%);
+            color: rgba(255,255,255,0.9); font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            text-align: center; padding: 20px;
+        }
+        h1 { font-size: 5rem; color: #a0d2ff; margin-bottom: 10px; }
+        p { font-size: 1.2rem; opacity: 0.7; margin-bottom: 30px; }
+        a {
+            display: inline-block; padding: 12px 28px; background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2); border-radius: 10px;
+            color: #a0d2ff; text-decoration: none; font-weight: bold; transition: background 0.2s;
+        }
+        a:hover { background: rgba(255,255,255,0.2); }
+    </style>
+</head>
+<body>
+    <div>
+        <h1>404</h1>
+        <p>页面未找到</p>
+        <a href="https://399520.xyz/a399">← 返回首页</a>
+    </div>
+</body>
+</html>`);
+}
+
 function genId() {
   return 'chatcmpl-' + crypto.randomUUID().replace(/-/g, '').slice(0, 24);
 }
@@ -624,6 +666,10 @@ export default {
 
     if (config.log_requests) {
       console.log(`[${new Date().toISOString()}] ${method} ${pathname}`);
+    }
+
+    if (matchRoute(method, pathname, 'GET /')) {
+      return homepage();
     }
 
     // CORS 预检
