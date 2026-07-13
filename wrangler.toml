@@ -1,0 +1,13 @@
+name = "llm-null"
+main = "index.js"
+compatibility_date = "2024-12-01"
+
+# 默认不绑定 KV，开箱即用，无需任何外部部件
+# 如需运行时动态修改配置，取消下方注释并填入 KV namespace ID
+# [[kv_namespaces]]
+# binding = "MOCK_LLM_KV"
+# id = "在此填入你的 KV namespace ID"
+
+# 变量绑定（可选覆盖默认配置）
+[vars]
+# CONFIG_OVERRIDE = '{"default_model_id":"claude-fable-5"}'
