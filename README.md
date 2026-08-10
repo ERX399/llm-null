@@ -1,3 +1,17 @@
+<div align="center">
+
+![:name](https://count.getloli.com/@llm-null?name=llm-null&theme=minecraft&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
+
+# LLM-Null
+
+_✨ Cloudflare Worker 固定回复 LLM API ✨_
+
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Cloudflare](https://img.shields.io/badge/Cloudflare-Workers-orange.svg)](https://workers.cloudflare.com/)
+[![GitHub](https://img.shields.io/badge/作者-ERX399-blue)](https://github.com/ERX399)
+
+</div>
+
 # LLM-Null
 
 Cloudflare Worker 上的固定回复 LLM API，支持 OpenAI / Claude / Responses 三套接口格式，也可作为 Codex 等使用 OpenAI Responses API 的客户端后端
