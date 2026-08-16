@@ -85,7 +85,7 @@ export const DEFAULT_CONFIG = {
       temperature: 1.0,
       stream_chunk_size: 0,
       finish_reason: "",
-      reasoning_tokens: 23462342,
+      reasoning_tokens: 23462,
       tool_calls: "",
       usage: "",
       metadata: {}
