@@ -17,7 +17,7 @@ export const DEFAULT_CONFIG = {
   },
 
   models: {
-    "claude-fable-5": {
+    "claude-fable-5.": {
       id: "claude-fable-5.1",
       name: "Claude Fable 5.1",
       number: 1,
