@@ -10,4 +10,4 @@ compatibility_date = "2024-12-01"
 
 # 变量绑定（可选覆盖默认配置）
 [vars]
-# CONFIG_OVERRIDE = '{"default_model_id":"claude-fable-5"}'
+# CONFIG_OVERRIDE = '{"default_model_id":"claude-fable-5.1"}'

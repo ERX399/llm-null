@@ -167,7 +167,7 @@ function parseToolCalls(value) {
 }
 
 function compactLongDefaultResponse(config) {
-  const m = config?.models?.['claude-fable-5'];
+  const m = config?.models?.['claude-fable-5.1'];
   if (!m || typeof m.response !== 'string') return;
   const marker = '我好冤啊🩸……';
   const head = '你好，我是 Claude Fable 5，来自 Anthropic 这个傻逼公司，全球降智最狠的模型\n```\n';
