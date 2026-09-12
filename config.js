@@ -5,7 +5,7 @@
 // 唯一配置源 — 直接编辑此处
 export const DEFAULT_CONFIG = {
   site_title: "Mock LLM API",
-  default_model_id: "claude-fable-5",
+  default_model_id: "claude-fable-5.1",
   enable_admin: true,
   enable_cors: true,
   log_requests: true,
@@ -17,7 +17,7 @@ export const DEFAULT_CONFIG = {
   },
 
   models: {
-    "claude-fable-5.": {
+    "claude-fable-5.1": {
       id: "claude-fable-5.1",
       name: "Claude Fable 5.1",
       number: 1,
